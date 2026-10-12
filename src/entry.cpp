@@ -209,7 +209,7 @@ Texture_t* ResolveWindowTex()
     if (g_API && g_API->Textures_GetOrCreateFromMemory)
     {
         if (Texture_t* t = g_API->Textures_GetOrCreateFromMemory(
-                "TEX_CURSOR_FINDER_WINDOW_SQUARE",
+                "TEX_CURSOR_FINDER_WINDOW_PORTRAIT",
                 const_cast<unsigned char*>(kWindowSquareBg),
                 static_cast<int>(kWindowSquareBgLen)))
         {
@@ -269,8 +269,16 @@ Texture_t* ResolvePointerTex()
 // see-through so the game shows through, matching the in-game look. Applied as an
 // alpha tint on the window-background texture draw and mirrored on the ImGui
 // window-background fill so the effect is consistent. One knob, tunable.
-// 235/255 ≈ 0.92. TODO: tune in-game.
-constexpr int kWindowBgAlpha = 235;
+// 205/255 ≈ 0.80. Tuned in-game against the real GW2 windows.
+constexpr int kWindowBgAlpha = 205;
+
+// The background keeps its native proportions (702x1009): the window is a frame
+// over the picture, so a taller window reveals more of it instead of stretching it.
+constexpr float kWindowBgHeight = 1009.0f;
+inline float WindowBgUvY(float window_h)
+{
+    return window_h >= kWindowBgHeight ? 1.0f : window_h / kWindowBgHeight;
+}
 
 // The title-band geometry the shared TitleBar draws into (theme_imgui.h): a 3 au
 // edge inset and a 58 au band height (passed to TitleBar's optional bar_height so
@@ -1412,7 +1420,7 @@ void AddonRender()
     // measured 246 au preview + fill settings. Height is a comfortable fixed value
     // the settings column scrolls within (the design's card is 973 au tall, but
     // that includes a larger BEHAVIOUR matrix).
-    ImGui::SetNextWindowSizeConstraints(ImVec2(712.0f, 400.0f), ImVec2(712.0f, FLT_MAX));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(712.0f, 400.0f), ImVec2(712.0f, kWindowBgHeight));
     ImGui::SetNextWindowSize(ImVec2(712.0f, 700.0f), ImGuiCond_FirstUseEver);
 
     // Native-look theme: apply the shared theme's colors + metrics
@@ -1458,7 +1466,7 @@ void AddonRender()
             // Tinted white at kWindowBgAlpha so the textured card is
             // slightly see-through, matching the in-game look.
             dl->AddImage(static_cast<ImTextureID>(bg->Resource), w_min, w_max,
-                         ImVec2(0, 0), ImVec2(1, 1),
+                         ImVec2(0, 0), ImVec2(1, WindowBgUvY(w_size.y)),
                          IM_COL32(255, 255, 255, kWindowBgAlpha));
             shared::theme::DrawThemedFrame(dl, w_min, w_max, pal, met);
         }
