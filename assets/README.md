@@ -1,8 +1,18 @@
 # Cursor Finder preset art
 
-Layered preset art for the five cursor presets (the layered recolor
+Layered preset art for the cursor presets (the layered recolor
 mechanism). Rasterized from the vector design sources in [`./svg`](svg/); no game
 textures are bundled.
+
+**The Pulse Ring is drawn in code**, not from images: `DrawPulseRing`
+in `src/entry.cpp` strokes two circles with the ImGui draw list, using the
+geometry from `pulse_ring_geometry` in `core/marker.cpp` (the design's circle
+radius 74 and colour stroke 11 in its 200-unit box, scaled to the marker size,
+plus a fixed 2 px dark outline band on each side). `svg/pulse-ring-colour.svg`
+stays as the design source of the ring; `svg/pulse-ring-outline.svg` is kept for
+reference only (the drawn outline is the fixed 2 px band, not its stroke).
+`rasterize.mjs` skips both and there are no `pulse-ring-*.png` files. The other
+four presets still use the layers below.
 
 ## Layer scheme
 
@@ -63,3 +73,4 @@ python3 gen_texture_data.py  # presets/*.png -> preset_textures_data.h (byte arr
 
 Editing a mask means re-running both steps. `node_modules` is not committed;
 `preset_textures_data.h` is (it's the source of truth the DLL compiles in).
+It carries 8 layers (four presets); the Pulse Ring has none.

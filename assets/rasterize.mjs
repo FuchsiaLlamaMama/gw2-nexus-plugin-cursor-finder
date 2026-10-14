@@ -14,7 +14,9 @@
 //   npm install @resvg/resvg-js
 //   node rasterize.mjs
 //
-// Every *.svg in ./svg is rendered to ./presets/<same-name>.png at OUT_SIZE.
+// Every *.svg in ./svg is rendered to ./presets/<same-name>.png at OUT_SIZE,
+// except the Pulse Ring's: it is drawn in code (src/entry.cpp, DrawPulseRing),
+// so its SVGs stay only as the design source of its geometry.
 
 import { readdirSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join, basename } from 'node:path';
@@ -25,10 +27,15 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const SRC = join(HERE, 'svg');
 const OUT = join(HERE, 'presets');
 const OUT_SIZE = 256; // px, square (design viewBox is 200x200)
+// Presets drawn in code — their SVGs are not rasterized.
+const DRAWN_IN_CODE = ['pulse-ring-'];
 
 mkdirSync(OUT, { recursive: true });
 
-const svgs = readdirSync(SRC).filter((f) => f.endsWith('.svg')).sort();
+const svgs = readdirSync(SRC)
+  .filter((f) => f.endsWith('.svg'))
+  .filter((f) => !DRAWN_IN_CODE.some((prefix) => f.startsWith(prefix)))
+  .sort();
 if (svgs.length === 0) {
   console.error(`No .svg files found in ${SRC}`);
   process.exit(1);

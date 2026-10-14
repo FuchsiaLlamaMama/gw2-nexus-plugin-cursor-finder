@@ -408,11 +408,50 @@ TEST_CASE("a non-positive marker size yields a degenerate rect at the point")
     CHECK(r.center_y() == doctest::Approx(60));
 }
 
-TEST_CASE("the pulse-ring radius is half the marker size")
+TEST_CASE("the pulse-ring geometry is the design's ring at size 200")
 {
-    CHECK(cursor_finder::pulse_ring_radius(200) == doctest::Approx(100.0f));
-    CHECK(cursor_finder::pulse_ring_radius(0)   == doctest::Approx(0.0f));
-    CHECK(cursor_finder::pulse_ring_radius(-5)  == doctest::Approx(0.0f));
+    // Design: 200-unit box, circle radius 74, colour stroke 11; the outline is the
+    // colour stroke plus a fixed 2 px band on each side.
+    const cursor_finder::PulseRingGeometry g = cursor_finder::pulse_ring_geometry(200);
+    CHECK(g.radius         == doctest::Approx(74.0f));
+    CHECK(g.colour_stroke  == doctest::Approx(11.0f));
+    CHECK(g.outline_stroke == doctest::Approx(15.0f));
+    CHECK(cursor_finder::kPulseRingOutlineBandPx == doctest::Approx(2.0f));
+}
+
+TEST_CASE("the pulse ring scales with size while the outline band stays 2 px")
+{
+    struct Case { float size; float radius; float colour_stroke; };
+    const Case cases[] = {
+        {40.0f,  14.8f,  2.2f},
+        {74.0f,  27.38f, 4.07f},
+        {100.0f, 37.0f,  5.5f},
+    };
+    for (const Case& c : cases)
+    {
+        CAPTURE(c.size);
+        const cursor_finder::PulseRingGeometry g = cursor_finder::pulse_ring_geometry(c.size);
+        CHECK(g.radius        == doctest::Approx(c.radius));
+        CHECK(g.colour_stroke == doctest::Approx(c.colour_stroke));
+        // Linear in size: radius and colour stroke keep the design's 74 : 11 : 200.
+        CHECK(g.radius / c.size        == doctest::Approx(74.0f / 200.0f));
+        CHECK(g.colour_stroke / c.size == doctest::Approx(11.0f / 200.0f));
+        // The outline is 2 px beyond the colour stroke on each side, at every size.
+        CHECK(g.outline_stroke == doctest::Approx(c.colour_stroke + 4.0f));
+        CHECK((g.outline_stroke - g.colour_stroke) * 0.5f == doctest::Approx(2.0f));
+    }
+}
+
+TEST_CASE("a non-positive marker size yields an empty pulse ring")
+{
+    for (const float size : {0.0f, -5.0f})
+    {
+        CAPTURE(size);
+        const cursor_finder::PulseRingGeometry g = cursor_finder::pulse_ring_geometry(size);
+        CHECK(g.radius         == doctest::Approx(0.0f));
+        CHECK(g.colour_stroke  == doctest::Approx(0.0f));
+        CHECK(g.outline_stroke == doctest::Approx(0.0f));
+    }
 }
 
 // --- clip state machine test helper -------------------------------------------

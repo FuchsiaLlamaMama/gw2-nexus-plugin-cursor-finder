@@ -15,9 +15,19 @@ MarkerRect centered_marker_rect(float center_x, float center_y, float size)
                       center_x + half, center_y + half};
 }
 
-float pulse_ring_radius(float size)
+PulseRingGeometry pulse_ring_geometry(float size)
 {
-    return size > 0.0f ? size * 0.5f : 0.0f;
+    if (size <= 0.0f) { return PulseRingGeometry{}; }
+    // Design values in its 200-unit box.
+    constexpr float kDesignBox    = 200.0f;
+    constexpr float kDesignRadius = 74.0f;
+    constexpr float kDesignStroke = 11.0f;
+    const float scale = size / kDesignBox;
+    PulseRingGeometry g;
+    g.radius         = kDesignRadius * scale;
+    g.colour_stroke  = kDesignStroke * scale;
+    g.outline_stroke = g.colour_stroke + 2.0f * kPulseRingOutlineBandPx;
+    return g;
 }
 
 } // namespace cursor_finder

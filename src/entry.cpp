@@ -8,13 +8,15 @@
 // versioned JSON in the addon directory (write-through — durability does not
 // depend on Unload; see core/cursor_finder_store.h).
 //
-// Presets are drawn from layered white/alpha mask textures: a
+// The Pulse Ring is drawn in code with the ImGui draw list: two
+// stroked circles, outline under colour, sharp at any size. The other presets are
+// still drawn from layered white/alpha mask textures: a
 // tintable outline layer + a tintable colour layer, embedded as C byte arrays
 // (assets/preset_textures_data.h) and loaded via Textures_GetOrCreateFromMemory.
 // Each layer is tinted at draw time with AddImage, so one PNG serves any colour.
 // Draw order is outline UNDER colour (the outline reads as a dark halo behind the
 // brighter core). If a texture is not ready yet, the frame falls back to the
-// procedural ring so the marker never blanks.
+// code-drawn ring so the marker never blanks.
 //
 // This file is Windows/MSVC-only (Nexus.h + ImGui + Windows.h). The testable
 // logic (settings, migration, geometry) lives in cursor-finder-core, which builds and
@@ -123,6 +125,8 @@ std::atomic<bool> g_FocusLost{false}; // game lost focus / alt-tab / kill-focus
 // One entry per preset (indexed by (int)cursor_finder::Preset): the Nexus texture
 // identifier + embedded PNG bytes (from preset_textures_data.h) for each layer.
 // Loaded via Textures_GetOrCreateFromMemory — no Windows resource lookup.
+// A preset drawn in code has an EMPTY slot (null data) — kept, not deleted, so
+// the table stays indexed by preset number.
 struct LayerTex {
     const char*          id;
     const unsigned char* data;
@@ -133,8 +137,7 @@ struct PresetTex {
     LayerTex colour;
 };
 const PresetTex kPresetTex[] = {
-    { {"TEX_CURSOR_FINDER_PULSE_RING_OUTLINE",       cursor_finder_art::kPulseRingOutline,       cursor_finder_art::kPulseRingOutline_len},
-      {"TEX_CURSOR_FINDER_PULSE_RING_COLOUR",        cursor_finder_art::kPulseRingColour,        cursor_finder_art::kPulseRingColour_len} },
+    { {nullptr, nullptr, 0u}, {nullptr, nullptr, 0u} }, // Pulse Ring: drawn in code (DrawPulseRing)
     { {"TEX_CURSOR_FINDER_CORNER_RETICLE_OUTLINE",   cursor_finder_art::kCornerReticleOutline,   cursor_finder_art::kCornerReticleOutline_len},
       {"TEX_CURSOR_FINDER_CORNER_RETICLE_COLOUR",    cursor_finder_art::kCornerReticleColour,    cursor_finder_art::kCornerReticleColour_len} },
     { {"TEX_CURSOR_FINDER_BEACON_CROSSHAIR_OUTLINE", cursor_finder_art::kBeaconCrosshairOutline, cursor_finder_art::kBeaconCrosshairOutline_len},
@@ -175,15 +178,24 @@ struct PresetTexCache {
 };
 PresetTexCache g_Tex[5];
 
+// Whether a preset is still drawn from layer images (its kPresetTex slot carries
+// data). False for presets drawn in code — callers never resolve a texture for them.
+bool PresetUsesImages(int idx)
+{
+    return kPresetTex[idx].colour.data != nullptr;
+}
+
 // Resolve a preset layer's texture: cache once, else decode the embedded PNG
 // bytes via Textures_GetOrCreateFromMemory (no resource lookup / module handle).
 // Returns nullptr (or a texture whose Resource is not ready yet) — the caller
-// falls back to the procedural ring for that frame.
+// falls back to the code-drawn ring for that frame. Never called for a preset
+// drawn in code (callers check PresetUsesImages); the guard below is a backstop.
 Texture_t* ResolveTex(int idx, bool colour_layer)
 {
     Texture_t*& slot = colour_layer ? g_Tex[idx].colour : g_Tex[idx].outline;
     if (slot && slot->Resource) { return slot; }
     const LayerTex& lt = colour_layer ? kPresetTex[idx].colour : kPresetTex[idx].outline;
+    if (!lt.data) { return nullptr; }
     if (g_API && g_API->Textures_GetOrCreateFromMemory)
     {
         if (Texture_t* t = g_API->Textures_GetOrCreateFromMemory(
@@ -368,6 +380,14 @@ ImU32 LayerTint(const cursor_finder::Rgb& c, int opacity_pct)
     return IM_COL32(c.r, c.g, c.b, a);
 }
 
+// The tint for a code-drawn outline: the layer tint with its alpha times 0.9,
+// the alpha the Pulse Ring's outline mask carried (svg/pulse-ring-outline.svg).
+ImU32 OutlineTint(const cursor_finder::Rgb& c, int opacity_pct)
+{
+    const int a = 255 * cursor_finder::clamp_int(opacity_pct, 0, 100) / 100 * 9 / 10;
+    return IM_COL32(c.r, c.g, c.b, a);
+}
+
 // The fill tint: fill colour at fill_opacity, further scaled by overall opacity
 // so the Opacity control fades the whole marker uniformly.
 ImU32 FillTint(const cursor_finder::Rgb& c, int fill_opacity_pct, int opacity_pct)
@@ -398,29 +418,33 @@ ImVec2 CurrentPointer()
 
 // --- marker drawing ----------------------------------------------------------
 
-// Fallback procedural ring when a preset texture is not ready yet:
-// a dark outline stroke with a coloured core stroke on top. Keeps the marker
-// visible on the first few frames after load while textures upload.
-void DrawProceduralRing(ImDrawList* dl, const ImVec2& center, float size,
-                        const cursor_finder::CursorSettings& s, bool draw_outline)
+// The Pulse Ring, drawn in code at marker size `size` (geometry from
+// cursor_finder::pulse_ring_geometry): the outline stroke first (when
+// `draw_outline`), then the colour stroke on top — two circles of 96 segments.
+// ImGui v1.80's AddCircle strokes at radius - 0.5, so the radius passed is the
+// design radius + 0.5 to put the stroke centre on the design radius. Used for the
+// Pulse Ring marker, its style tile (colour only), and as every other preset's
+// fallback for the frames before its texture is ready.
+void DrawPulseRing(ImDrawList* dl, const ImVec2& center, float size,
+                   ImU32 colour, bool draw_outline, ImU32 outline_colour)
 {
-    const float radius = cursor_finder::pulse_ring_radius(size);
-    if (radius <= 0.0f) { return; }
-    constexpr int   kSegments   = 48;
-    constexpr float kCoreStroke = 3.0f;
+    const cursor_finder::PulseRingGeometry g = cursor_finder::pulse_ring_geometry(size);
+    if (g.radius <= 0.0f) { return; }
+    constexpr int   kSegments    = 96;
+    constexpr float kInsetCancel = 0.5f; // AddCircle's half-pixel inset
+    const float r = g.radius + kInsetCancel;
     if (draw_outline)
     {
-        dl->AddCircle(center, radius, LayerTint(s.outline_colour, s.opacity_pct),
-                      kSegments, kCoreStroke + 2.0f);
+        dl->AddCircle(center, r, outline_colour, kSegments, g.outline_stroke);
     }
-    dl->AddCircle(center, radius, LayerTint(s.colour, s.opacity_pct),
-                  kSegments, kCoreStroke);
+    dl->AddCircle(center, r, colour, kSegments, g.colour_stroke);
 }
 
 // Draw the selected preset centered on `center` at the settings' size: an
 // optional translucent fill disc, then the outline layer (if enabled), then the
-// colour layer on top — each a white mask tinted at draw time.
-// Falls back to the procedural ring for any frame the layer textures are not
+// colour layer on top — each a white mask tinted at draw time, or, for the Pulse
+// Ring, two strokes drawn in code (no texture, so it draws from the first frame).
+// Falls back to the code-drawn ring for any frame the layer textures are not
 // ready. Drawn OVER the pointer — never replacing it.
 void DrawMarker(ImDrawList* dl, const ImVec2& center, const cursor_finder::CursorSettings& s)
 {
@@ -455,13 +479,23 @@ void DrawMarker(ImDrawList* dl, const ImVec2& center, const cursor_finder::Curso
         }
     }
 
+    const ImU32 ring_colour  = LayerTint(s.colour, s.opacity_pct);
+    const ImU32 ring_outline = OutlineTint(s.outline_colour, s.opacity_pct);
+
+    // Presets drawn in code (the Pulse Ring) never touch a texture.
+    if (!PresetUsesImages(idx))
+    {
+        DrawPulseRing(dl, center, size, ring_colour, draw_outline, ring_outline);
+        return;
+    }
+
     Texture_t* colour_tex  = ResolveTex(idx, /*colour_layer=*/true);
     Texture_t* outline_tex = draw_outline ? ResolveTex(idx, /*colour_layer=*/false) : nullptr;
 
-    // Until the colour layer is ready, keep the marker visible procedurally.
+    // Until the colour layer is ready, keep the marker visible with the drawn ring.
     if (!colour_tex || !colour_tex->Resource)
     {
-        DrawProceduralRing(dl, center, size, s, draw_outline);
+        DrawPulseRing(dl, center, size, ring_colour, draw_outline, ring_outline);
         return;
     }
 
@@ -786,7 +820,9 @@ void RenderPanel()
                 // signature hue so each tile shows in its signature colour (Ring
                 // magenta, Reticle cyan, Cross white, Dash violet, Halo teal). If
                 // the texture's Resource isn't uploaded yet, the icon area is left
-                // blank (no hand-drawn fallback).
+                // blank (no hand-drawn fallback). A preset drawn in code (the Pulse
+                // Ring) is drawn by the same routine as its marker, at icon size,
+                // colour stroke only — as the tile shows only the colour layer.
                 const float cx = tile_pos.x + tile_w * 0.5f;
                 const float icon_half = tile_w * 0.26f; // 0.52 wide, centered
                 const float icon_cy   = tile_pos.y + tile_w * 0.40f;
@@ -794,8 +830,13 @@ void RenderPanel()
                 const ImVec2 icon_max(cx + icon_half, icon_cy + icon_half);
                 const cursor_finder::Rgb hue = cursor_finder::signature_hue(kPresets[i].p);
                 const ImU32 tint = IM_COL32(hue.r, hue.g, hue.b, 255);
-                if (Texture_t* t = ResolveTex(i, /*colour_layer=*/true);
-                    t && t->Resource)
+                if (!PresetUsesImages(i))
+                {
+                    DrawPulseRing(sdl, ImVec2(cx, icon_cy), icon_half * 2.0f, tint,
+                                  /*draw_outline=*/false, 0);
+                }
+                else if (Texture_t* t = ResolveTex(i, /*colour_layer=*/true);
+                         t && t->Resource)
                 {
                     sdl->AddImage(static_cast<ImTextureID>(t->Resource),
                                   icon_min, icon_max, ImVec2(0, 0), ImVec2(1, 1), tint);
@@ -1239,23 +1280,27 @@ bool CursorIsHidden()
 }
 
 // One-shot texture-readiness diagnostic: after a few seconds, report how many
-// preset layers actually have a live Resource. If this logs 0 ready, the load
-// path itself is the problem (not our draw code).
+// preset layers actually have a live Resource, out of the presets still drawn
+// from images (presets drawn in code have no texture to wait for). If this logs
+// 0 ready, the load path itself is the problem (not our draw code).
 void MaybeLogTexReadiness()
 {
     static int  frames = 0;
     static bool logged = false;
     if (logged || !g_API || !g_API->Log) { return; }
     if (++frames < 180) { return; } // ~3s at 60fps
-    int colour_ready = 0, outline_ready = 0;
+    int colour_ready = 0, outline_ready = 0, image_presets = 0;
     for (int i = 0; i < 5; ++i)
     {
+        if (!PresetUsesImages(i)) { continue; }
+        ++image_presets;
         if (g_Tex[i].colour  && g_Tex[i].colour->Resource)  { ++colour_ready; }
         if (g_Tex[i].outline && g_Tex[i].outline->Resource) { ++outline_ready; }
     }
     char msg[160];
     std::snprintf(msg, sizeof(msg),
-        "cursor-finder: preset textures ready colour=%d/5 outline=%d/5", colour_ready, outline_ready);
+        "cursor-finder: preset textures ready colour=%d/%d outline=%d/%d",
+        colour_ready, image_presets, outline_ready, image_presets);
     g_API->Log(LOGL_INFO, "Cursor Finder", msg);
     logged = true;
 }
@@ -1628,10 +1673,17 @@ void AddonLoad(AddonAPI_t* aApi)
 
     if (aApi->Log)
     {
+        // Count the layers that still come from images (empty slots are drawn in code).
+        unsigned image_layers = 0;
+        for (const PresetTex& pt : kPresetTex)
+        {
+            if (pt.outline.data) { ++image_layers; }
+            if (pt.colour.data)  { ++image_layers; }
+        }
         char msg[160];
         std::snprintf(msg, sizeof(msg),
             "cursor-finder: Textures_GetOrCreateFromMemory=%p (loading %u preset layers from memory)",
-            reinterpret_cast<void*>(aApi->Textures_GetOrCreateFromMemory), 10u);
+            reinterpret_cast<void*>(aApi->Textures_GetOrCreateFromMemory), image_layers);
         aApi->Log(LOGL_INFO, "Cursor Finder", msg);
     }
 
