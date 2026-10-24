@@ -942,7 +942,7 @@ void RenderPanel()
         // Size and Opacity — ranges from the reference design, relaid as
         // 3-part rows (design size-row/opacity-row). Behaviour is identical.
         int size = s.size_px;
-        if (SliderRow("Size", "##size", &size, cursor_finder::kSizeMin, cursor_finder::kSizeMax, "%d px"))
+        if (SliderRow("Size", "##size", &size, cursor_finder::kSizeMin, cursor_finder::kSizeMax, "%d"))
         {
             s.size_px = cursor_finder::clamp_int(size, cursor_finder::kSizeMin, cursor_finder::kSizeMax);
         }
