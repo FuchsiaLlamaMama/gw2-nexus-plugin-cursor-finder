@@ -11,8 +11,23 @@ radius 74 and colour stroke 11 in its 200-unit box, scaled to the marker size,
 plus a fixed 2 px dark outline band on each side). `svg/pulse-ring-colour.svg`
 stays as the design source of the ring; `svg/pulse-ring-outline.svg` is kept for
 reference only (the drawn outline is the fixed 2 px band, not its stroke).
-`rasterize.mjs` skips both and there are no `pulse-ring-*.png` files. The other
-four presets still use the layers below.
+`rasterize.mjs` skips both and there are no `pulse-ring-*.png` files.
+
+**The Corner Reticle and Beacon Crosshair are drawn in code** too, the same way
+(`DrawCornerReticle` and `DrawBeaconCrosshair` in `src/entry.cpp`, geometry from
+`corner_reticle_geometry` and `beacon_crosshair_geometry` in `core/marker.cpp`):
+the design's shapes in their 200-unit box scaled to the marker size, with the same
+fixed 2 px dark outline band. The reticle's four brackets are stroke 11 with round
+caps and a round outer corner (each bracket filled as one mesh) and a dot r 5.5;
+the crosshair's four triangles and dot r 5 are filled, and its outline is each
+triangle enlarged by 2 px on every side, its tip cut straight across 2 px past
+the colour tip. `svg/corner-reticle-colour.svg` and
+`svg/beacon-crosshair-colour.svg` stay as the design sources;
+`svg/corner-reticle-outline.svg` and `svg/beacon-crosshair-outline.svg` are kept
+for reference only (the drawn outline is the fixed 2 px band, not their strokes).
+`rasterize.mjs` skips all four and there are no `corner-reticle-*.png` or
+`beacon-crosshair-*.png` files. Radar Dash and Soft Halo still use the layers
+below.
 
 ## Layer scheme
 
@@ -73,4 +88,5 @@ python3 gen_texture_data.py  # presets/*.png -> preset_textures_data.h (byte arr
 
 Editing a mask means re-running both steps. `node_modules` is not committed;
 `preset_textures_data.h` is (it's the source of truth the DLL compiles in).
-It carries 8 layers (four presets); the Pulse Ring has none.
+It carries 4 layers (Radar Dash and Soft Halo); the presets drawn in code have
+none.

@@ -14,10 +14,13 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <string>
 #include <type_traits>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -451,6 +454,407 @@ TEST_CASE("a non-positive marker size yields an empty pulse ring")
         CHECK(g.radius         == doctest::Approx(0.0f));
         CHECK(g.colour_stroke  == doctest::Approx(0.0f));
         CHECK(g.outline_stroke == doctest::Approx(0.0f));
+    }
+}
+
+// --- Corner Reticle / Beacon Crosshair drawn in code ---------------------------
+
+namespace {
+using cursor_finder::MarkerPoint;
+
+// Marker sizes the drawn presets must hold at: the design box, the v1.0 slider's
+// range, and the planned v1.1 minimum (3 % of 1080 px and 768 px screen height).
+constexpr float kDrawnSizes[] = {200.0f, 100.0f, 74.0f, 40.0f, 32.0f, 23.0f};
+
+// A design point (200-unit box, centre 100,100) placed on a marker of `size`
+// centred on (cx, cy).
+MarkerPoint design_point(float dx, float dy, float cx, float cy, float size)
+{
+    const float scale = size / 200.0f;
+    return MarkerPoint{cx + (dx - 100.0f) * scale, cy + (dy - 100.0f) * scale};
+}
+
+void expect_point(const MarkerPoint& got, const MarkerPoint& want)
+{
+    CHECK(got.x == doctest::Approx(want.x));
+    CHECK(got.y == doctest::Approx(want.y));
+}
+
+float distance(const MarkerPoint& a, const MarkerPoint& b)
+{
+    return std::hypot(a.x - b.x, a.y - b.y);
+}
+
+// Distance from p to the segment a-b.
+float distance_to_segment(const MarkerPoint& p, const MarkerPoint& a, const MarkerPoint& b)
+{
+    const float vx = b.x - a.x, vy = b.y - a.y;
+    const float len2 = vx * vx + vy * vy;
+    float t = len2 > 0.0f ? ((p.x - a.x) * vx + (p.y - a.y) * vy) / len2 : 0.0f;
+    t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+    return distance(p, MarkerPoint{a.x + t * vx, a.y + t * vy});
+}
+
+// Signed distance from p to the line through a -> b, positive on the OUTSIDE of
+// a shape wound clockwise on screen (y down): the outward normal is (dy, -dx),
+// the one ImGui's anti-aliased fill uses.
+float outward_distance(const MarkerPoint& p, const MarkerPoint& a, const MarkerPoint& b)
+{
+    const float dx = b.x - a.x, dy = b.y - a.y;
+    const float len = std::hypot(dx, dy);
+    return ((p.x - a.x) * dy - (p.y - a.y) * dx) / len;
+}
+
+// Twice the shoelace area; positive means clockwise on screen (y down) — the
+// winding ImGui 1.80's anti-aliased fill needs for its fringe to fall outside.
+float twice_signed_area(const MarkerPoint* pts, int n)
+{
+    float a = 0.0f;
+    for (int i = 0; i < n; ++i)
+    {
+        const MarkerPoint& p = pts[i];
+        const MarkerPoint& q = pts[(i + 1) % n];
+        a += p.x * q.y - q.x * p.y;
+    }
+    return a;
+}
+} // namespace
+
+TEST_CASE("the corner-reticle geometry is the design's reticle at size 200")
+{
+    // Design (assets/svg/corner-reticle-colour.svg): four brackets, stroke 11, round
+    // caps and joins, centre dot r 5.5. Outline: stroke + 2 x 2 px, dot r + 2 px.
+    const cursor_finder::CornerReticleGeometry g =
+        cursor_finder::corner_reticle_geometry(100.0f, 100.0f, 200.0f);
+    const float want[4][3][2] = {
+        {{40, 64},   {40, 40},   {64, 40}},
+        {{136, 40},  {160, 40},  {160, 64}},
+        {{160, 136}, {160, 160}, {136, 160}},
+        {{64, 160},  {40, 160},  {40, 136}},
+    };
+    for (int b = 0; b < 4; ++b)
+    {
+        CAPTURE(b);
+        for (int k = 0; k < 3; ++k)
+        {
+            expect_point(g.brackets[b][k], MarkerPoint{want[b][k][0], want[b][k][1]});
+        }
+    }
+    expect_point(g.dot_center, MarkerPoint{100.0f, 100.0f});
+    CHECK(g.stroke             == doctest::Approx(11.0f));
+    CHECK(g.dot_radius         == doctest::Approx(5.5f));
+    CHECK(g.outline_stroke     == doctest::Approx(15.0f));
+    CHECK(g.outline_dot_radius == doctest::Approx(7.5f));
+    CHECK(cursor_finder::kMarkerOutlineBandPx == doctest::Approx(2.0f));
+}
+
+TEST_CASE("the corner reticle scales with size while the outline band stays 2 px")
+{
+    const float design[4][3][2] = {
+        {{40, 64},   {40, 40},   {64, 40}},
+        {{136, 40},  {160, 40},  {160, 64}},
+        {{160, 136}, {160, 160}, {136, 160}},
+        {{64, 160},  {40, 160},  {40, 136}},
+    };
+    const float cx = 640.0f, cy = 360.0f;
+    for (const float size : kDrawnSizes)
+    {
+        CAPTURE(size);
+        const cursor_finder::CornerReticleGeometry g =
+            cursor_finder::corner_reticle_geometry(cx, cy, size);
+        for (int b = 0; b < 4; ++b)
+        {
+            for (int k = 0; k < 3; ++k)
+            {
+                expect_point(g.brackets[b][k],
+                             design_point(design[b][k][0], design[b][k][1], cx, cy, size));
+            }
+        }
+        expect_point(g.dot_center, MarkerPoint{cx, cy});
+        CHECK(g.stroke     == doctest::Approx(11.0f * size / 200.0f));
+        CHECK(g.dot_radius == doctest::Approx(5.5f * size / 200.0f));
+        // The outline is 2 px beyond the colour shape at every size.
+        CHECK((g.outline_stroke - g.stroke) * 0.5f       == doctest::Approx(2.0f));
+        CHECK(g.outline_dot_radius - g.dot_radius        == doctest::Approx(2.0f));
+    }
+}
+
+namespace {
+// The stroked bracket's boundary (what the DLL fills), checked against the bracket:
+// every point lies at half the stroke from the bracket's centre line; in the
+// corner's outside quadrant the points sit at half the stroke from the corner
+// vertex (an SVG round join, not ImGui's square mitre at h * sqrt(2)); past each
+// arm end, on that arm's side of the diagonal, they sit at half the stroke from the
+// end (round caps). Wound clockwise on screen, and it fills as one triangle fan
+// from the corner vertex with no two triangles overlapping. `eps` is the margin
+// (px) for sorting points into the quadrant and past the caps.
+void check_bracket_boundary(const MarkerPoint (&bracket)[3], float stroke, float eps)
+{
+    const float h = stroke * 0.5f;
+    const MarkerPoint& a = bracket[0];
+    const MarkerPoint& v = bracket[1];
+    const MarkerPoint& e = bracket[2];
+    const cursor_finder::BracketBoundary boundary =
+        cursor_finder::bracket_stroke_boundary(bracket, stroke);
+    REQUIRE(boundary.count >= 3);
+    CHECK(boundary.count <= cursor_finder::kBracketBoundaryMaxPoints);
+    CHECK(twice_signed_area(boundary.points, boundary.count) > 0.0f);
+
+    // Unit directions from the corner vertex along each arm.
+    const float la = distance(a, v), le = distance(e, v);
+    const MarkerPoint ua{(a.x - v.x) / la, (a.y - v.y) / la};
+    const MarkerPoint ue{(e.x - v.x) / le, (e.y - v.y) / le};
+    int in_corner_quadrant = 0, past_cap_a = 0, past_cap_e = 0;
+    for (int i = 0; i < boundary.count; ++i)
+    {
+        const MarkerPoint& p = boundary.points[i];
+        const float along_a = (p.x - v.x) * ua.x + (p.y - v.y) * ua.y;
+        const float along_e = (p.x - v.x) * ue.x + (p.y - v.y) * ue.y;
+        const float to_line = std::min(distance_to_segment(p, a, v),
+                                       distance_to_segment(p, v, e));
+        CHECK(to_line == doctest::Approx(h).epsilon(1e-3));
+        if (along_a < -eps && along_e < -eps)
+        {
+            ++in_corner_quadrant;
+            CHECK(distance(p, v) == doctest::Approx(h).epsilon(1e-3));
+        }
+        if (along_a > la + eps && along_a >= along_e)
+        {
+            ++past_cap_a;
+            CHECK(distance(p, a) == doctest::Approx(h).epsilon(1e-3));
+        }
+        if (along_e > le + eps && along_e >= along_a)
+        {
+            ++past_cap_e;
+            CHECK(distance(p, e) == doctest::Approx(h).epsilon(1e-3));
+        }
+    }
+    // The round pieces are really there (not just their end points).
+    CHECK(in_corner_quadrant >= 3);
+    CHECK(past_cap_a >= 3);
+    CHECK(past_cap_e >= 3);
+
+    // The DLL fills it as one triangle fan from the corner vertex. Every fan
+    // triangle turns the same way and the fan goes round exactly once, so no two
+    // triangles overlap: nothing is painted twice.
+    const int n = boundary.count;
+    float turned = 0.0f;
+    for (int i = 0; i < n; ++i)
+    {
+        const MarkerPoint fan[3] = {v, boundary.points[i], boundary.points[(i + 1) % n]};
+        CHECK(twice_signed_area(fan, 3) > 0.0f);
+        const float p0x = fan[1].x - v.x, p0y = fan[1].y - v.y;
+        const float p1x = fan[2].x - v.x, p1y = fan[2].y - v.y;
+        turned += std::atan2(p0x * p1y - p0y * p1x, p0x * p1x + p0y * p1y);
+    }
+    CHECK(turned == doctest::Approx(2.0f * 3.14159265f).epsilon(1e-4));
+}
+} // namespace
+
+TEST_CASE("a corner-reticle bracket has a round outer corner and round caps")
+{
+    for (const float size : kDrawnSizes)
+    {
+        const cursor_finder::CornerReticleGeometry g =
+            cursor_finder::corner_reticle_geometry(300.0f, 200.0f, size);
+        for (const float stroke : {g.stroke, g.outline_stroke})
+        {
+            for (int b = 0; b < 4; ++b)
+            {
+                CAPTURE(size);
+                CAPTURE(stroke);
+                CAPTURE(b);
+                check_bracket_boundary(g.brackets[b], stroke, 1e-3f * size);
+            }
+        }
+    }
+}
+
+TEST_CASE("a bracket with arms shorter than half its stroke stays round where its caps meet")
+{
+    // Under ~21.6 px the reticle's outline half-stroke (0.0275 * size + 2) outgrows
+    // its arms (0.12 * size), and a short bracket stroked wide does the same: the
+    // inner sides never reach each other, so the two caps' circles meet on the
+    // diagonal instead, at (l + sqrt(2 h^2 - l^2)) / 2 along each arm — h from both
+    // arm ends. The same properties hold as for a long-armed bracket.
+    auto check_short = [](const MarkerPoint (&bracket)[3], float stroke) {
+        const float h = stroke * 0.5f;
+        const MarkerPoint& a = bracket[0];
+        const MarkerPoint& v = bracket[1];
+        const MarkerPoint& e = bracket[2];
+        const float l = distance(a, v);
+        REQUIRE(distance(e, v) == doctest::Approx(l));
+        REQUIRE(l < h); // the short-arm case
+        check_bracket_boundary(bracket, stroke, 1e-3f * stroke);
+
+        // The caps' meeting point is on the boundary, on the diagonal past both ends.
+        const float inner = 0.5f * (l + std::sqrt(2.0f * h * h - l * l));
+        const MarkerPoint meet{v.x + inner * ((a.x - v.x) + (e.x - v.x)) / l,
+                               v.y + inner * ((a.y - v.y) + (e.y - v.y)) / l};
+        CHECK(distance(meet, a) == doctest::Approx(h).epsilon(1e-3));
+        CHECK(distance(meet, e) == doctest::Approx(h).epsilon(1e-3));
+        const cursor_finder::BracketBoundary boundary =
+            cursor_finder::bracket_stroke_boundary(bracket, stroke);
+        float nearest = stroke;
+        for (int i = 0; i < boundary.count; ++i)
+        {
+            nearest = std::min(nearest, distance(boundary.points[i], meet));
+        }
+        CHECK(nearest < 1e-4f * stroke);
+    };
+
+    for (const float size : {21.0f, 16.0f, 10.0f})
+    {
+        const cursor_finder::CornerReticleGeometry g =
+            cursor_finder::corner_reticle_geometry(300.0f, 200.0f, size);
+        for (int b = 0; b < 4; ++b)
+        {
+            CAPTURE(size);
+            CAPTURE(b);
+            check_short(g.brackets[b], g.outline_stroke);
+        }
+    }
+    // Arms 4 px and 1 px long under a 12 px stroke (h 6), well inside the case.
+    for (const float l : {4.0f, 1.0f})
+    {
+        CAPTURE(l);
+        const MarkerPoint bracket[3] = {{100.0f, 100.0f + l}, {100.0f, 100.0f}, {100.0f + l, 100.0f}};
+        check_short(bracket, 12.0f);
+    }
+}
+
+TEST_CASE("the beacon-crosshair geometry is the design's crosshair at size 200")
+{
+    // Design (assets/svg/beacon-crosshair-colour.svg): four filled triangles, the top
+    // one (93,18),(107,18),(100,72) and its rotations about (100,100); dot r 5.
+    // Ordered top, right, bottom, left; each base, base, tip, clockwise on screen.
+    const cursor_finder::BeaconCrosshairGeometry g =
+        cursor_finder::beacon_crosshair_geometry(100.0f, 100.0f, 200.0f);
+    const float want[4][3][2] = {
+        {{93, 18},   {107, 18},  {100, 72}},
+        {{182, 93},  {182, 107}, {128, 100}},
+        {{107, 182}, {93, 182},  {100, 128}},
+        {{18, 107},  {18, 93},   {72, 100}},
+    };
+    for (int t = 0; t < 4; ++t)
+    {
+        CAPTURE(t);
+        for (int k = 0; k < 3; ++k)
+        {
+            expect_point(g.triangles[t][k], MarkerPoint{want[t][k][0], want[t][k][1]});
+        }
+    }
+    expect_point(g.dot_center, MarkerPoint{100.0f, 100.0f});
+    CHECK(g.dot_radius         == doctest::Approx(5.0f));
+    CHECK(g.outline_dot_radius == doctest::Approx(7.0f));
+}
+
+TEST_CASE("the beacon crosshair scales with size while the outline dot stays 2 px larger")
+{
+    const float design[4][3][2] = {
+        {{93, 18},   {107, 18},  {100, 72}},
+        {{182, 93},  {182, 107}, {128, 100}},
+        {{107, 182}, {93, 182},  {100, 128}},
+        {{18, 107},  {18, 93},   {72, 100}},
+    };
+    const float cx = 640.0f, cy = 360.0f;
+    for (const float size : kDrawnSizes)
+    {
+        CAPTURE(size);
+        const cursor_finder::BeaconCrosshairGeometry g =
+            cursor_finder::beacon_crosshair_geometry(cx, cy, size);
+        for (int t = 0; t < 4; ++t)
+        {
+            for (int k = 0; k < 3; ++k)
+            {
+                expect_point(g.triangles[t][k],
+                             design_point(design[t][k][0], design[t][k][1], cx, cy, size));
+            }
+        }
+        expect_point(g.dot_center, MarkerPoint{cx, cy});
+        CHECK(g.dot_radius                         == doctest::Approx(5.0f * size / 200.0f));
+        CHECK(g.outline_dot_radius - g.dot_radius  == doctest::Approx(2.0f));
+    }
+}
+
+TEST_CASE("each crosshair outline is its triangle enlarged 2 px, cut 2 px past the tip")
+{
+    // Tip half-angle: 7 units across, 54 long. The cut face (perpendicular to the
+    // axis, 2 px past the tip) is 2 * (2 / cos a - 2 * tan a) ~= 3.52 px wide at
+    // every size.
+    const float half_angle = std::atan(7.0f / 54.0f);
+    const float face_width =
+        2.0f * (2.0f / std::cos(half_angle) - 2.0f * std::tan(half_angle));
+    // Float coordinates near 400 px: allow ~1e-4 relative for the derived lengths.
+    constexpr double kGeomEps = 1e-4;
+    for (const float size : kDrawnSizes)
+    {
+        const cursor_finder::BeaconCrosshairGeometry g =
+            cursor_finder::beacon_crosshair_geometry(400.0f, 300.0f, size);
+        for (int t = 0; t < 4; ++t)
+        {
+            CAPTURE(size);
+            CAPTURE(t);
+            const MarkerPoint* tri = g.triangles[t];
+            const MarkerPoint* q   = g.outline_shapes[t];
+            // Both wound clockwise on screen (ImGui's anti-aliased fill needs it).
+            CHECK(twice_signed_area(tri, 3) > 0.0f);
+            CHECK(twice_signed_area(q, 4) > 0.0f);
+            // And convex (AddConvexPolyFilled fans it from its first point): it turns
+            // the same way, clockwise, at every corner.
+            for (int k = 0; k < 4; ++k)
+            {
+                CAPTURE(k);
+                const MarkerPoint corner[3] = {q[(k + 3) % 4], q[k], q[(k + 1) % 4]};
+                CHECK(twice_signed_area(corner, 3) > 0.0f);
+            }
+
+            // The base is 2 px further out.
+            CHECK(outward_distance(q[0], tri[0], tri[1]) == doctest::Approx(2.0f).epsilon(kGeomEps));
+            CHECK(outward_distance(q[1], tri[0], tri[1]) == doctest::Approx(2.0f).epsilon(kGeomEps));
+            // Each slanted side is 2 px further out along its whole length.
+            CHECK(outward_distance(q[1], tri[1], tri[2]) == doctest::Approx(2.0f).epsilon(kGeomEps));
+            CHECK(outward_distance(q[2], tri[1], tri[2]) == doctest::Approx(2.0f).epsilon(kGeomEps));
+            CHECK(outward_distance(q[3], tri[2], tri[0]) == doctest::Approx(2.0f).epsilon(kGeomEps));
+            CHECK(outward_distance(q[0], tri[2], tri[0]) == doctest::Approx(2.0f).epsilon(kGeomEps));
+
+            // The tip cut: both cut corners lie 2 px past the colour tip along the
+            // triangle's axis (so the cut is perpendicular to it).
+            const MarkerPoint mid{(tri[0].x + tri[1].x) * 0.5f, (tri[0].y + tri[1].y) * 0.5f};
+            const float axis_len = distance(mid, tri[2]);
+            const MarkerPoint axis{(tri[2].x - mid.x) / axis_len, (tri[2].y - mid.y) / axis_len};
+            for (const MarkerPoint& cut : {q[2], q[3]})
+            {
+                const float past_tip = (cut.x - tri[2].x) * axis.x + (cut.y - tri[2].y) * axis.y;
+                CHECK(past_tip == doctest::Approx(2.0f).epsilon(kGeomEps));
+            }
+            CHECK(distance(q[2], q[3]) == doctest::Approx(face_width).epsilon(kGeomEps));
+        }
+    }
+}
+
+TEST_CASE("a non-positive marker size yields an empty reticle and crosshair")
+{
+    for (const float size : {0.0f, -5.0f})
+    {
+        CAPTURE(size);
+        const cursor_finder::CornerReticleGeometry r =
+            cursor_finder::corner_reticle_geometry(50.0f, 60.0f, size);
+        CHECK(r.stroke             == doctest::Approx(0.0f));
+        CHECK(r.dot_radius         == doctest::Approx(0.0f));
+        CHECK(r.outline_stroke     == doctest::Approx(0.0f));
+        CHECK(r.outline_dot_radius == doctest::Approx(0.0f));
+        CHECK(cursor_finder::bracket_stroke_boundary(r.brackets[0], r.stroke).count == 0);
+
+        const cursor_finder::BeaconCrosshairGeometry c =
+            cursor_finder::beacon_crosshair_geometry(50.0f, 60.0f, size);
+        CHECK(c.dot_radius         == doctest::Approx(0.0f));
+        CHECK(c.outline_dot_radius == doctest::Approx(0.0f));
+        for (int t = 0; t < 4; ++t)
+        {
+            CHECK(twice_signed_area(c.triangles[t], 3)      == doctest::Approx(0.0f));
+            CHECK(twice_signed_area(c.outline_shapes[t], 4) == doctest::Approx(0.0f));
+        }
     }
 }
 

@@ -8,8 +8,9 @@
 // versioned JSON in the addon directory (write-through — durability does not
 // depend on Unload; see core/cursor_finder_store.h).
 //
-// The Pulse Ring is drawn in code with the ImGui draw list: two
-// stroked circles, outline under colour, sharp at any size. The other presets are
+// The Pulse Ring, Corner Reticle and Beacon Crosshair are drawn in code with the
+// ImGui draw list (stroked circles, filled bracket meshes, filled triangles),
+// outline under colour, sharp at any size. The other presets are
 // still drawn from layered white/alpha mask textures: a
 // tintable outline layer + a tintable colour layer, embedded as C byte arrays
 // (assets/preset_textures_data.h) and loaded via Textures_GetOrCreateFromMemory.
@@ -28,6 +29,7 @@
 #include <atomic>
 #include <cfloat>
 #include <cstdint>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 
@@ -138,10 +140,8 @@ struct PresetTex {
 };
 const PresetTex kPresetTex[] = {
     { {nullptr, nullptr, 0u}, {nullptr, nullptr, 0u} }, // Pulse Ring: drawn in code (DrawPulseRing)
-    { {"TEX_CURSOR_FINDER_CORNER_RETICLE_OUTLINE",   cursor_finder_art::kCornerReticleOutline,   cursor_finder_art::kCornerReticleOutline_len},
-      {"TEX_CURSOR_FINDER_CORNER_RETICLE_COLOUR",    cursor_finder_art::kCornerReticleColour,    cursor_finder_art::kCornerReticleColour_len} },
-    { {"TEX_CURSOR_FINDER_BEACON_CROSSHAIR_OUTLINE", cursor_finder_art::kBeaconCrosshairOutline, cursor_finder_art::kBeaconCrosshairOutline_len},
-      {"TEX_CURSOR_FINDER_BEACON_CROSSHAIR_COLOUR",  cursor_finder_art::kBeaconCrosshairColour,  cursor_finder_art::kBeaconCrosshairColour_len} },
+    { {nullptr, nullptr, 0u}, {nullptr, nullptr, 0u} }, // Corner Reticle: drawn in code (DrawCornerReticle)
+    { {nullptr, nullptr, 0u}, {nullptr, nullptr, 0u} }, // Beacon Crosshair: drawn in code (DrawBeaconCrosshair)
     { {"TEX_CURSOR_FINDER_RADAR_DASH_OUTLINE",       cursor_finder_art::kRadarDashOutline,       cursor_finder_art::kRadarDashOutline_len},
       {"TEX_CURSOR_FINDER_RADAR_DASH_COLOUR",        cursor_finder_art::kRadarDashColour,        cursor_finder_art::kRadarDashColour_len} },
     { {"TEX_CURSOR_FINDER_SOFT_HALO_OUTLINE",        cursor_finder_art::kSoftHaloOutline,        cursor_finder_art::kSoftHaloOutline_len},
@@ -423,7 +423,7 @@ ImVec2 CurrentPointer()
 // `draw_outline`), then the colour stroke on top — two circles of 96 segments.
 // ImGui v1.80's AddCircle strokes at radius - 0.5, so the radius passed is the
 // design radius + 0.5 to put the stroke centre on the design radius. Used for the
-// Pulse Ring marker, its style tile (colour only), and as every other preset's
+// Pulse Ring marker, its style tile (colour only), and as each image preset's
 // fallback for the frames before its texture is ready.
 void DrawPulseRing(ImDrawList* dl, const ImVec2& center, float size,
                    ImU32 colour, bool draw_outline, ImU32 outline_colour)
@@ -440,10 +440,178 @@ void DrawPulseRing(ImDrawList* dl, const ImVec2& center, float size,
     dl->AddCircle(center, r, colour, kSegments, g.colour_stroke);
 }
 
+// Fill a polygon (`count` points) that is star-shaped from `center` (every boundary
+// point is in plain view of it), wound clockwise on screen. A stroked bracket is concave, so
+// AddConvexPolyFilled (a fan from its first point) cannot fill it; this mirrors
+// ImGui v1.80's AddConvexPolyFilled — the same anti-aliased fringe straddling
+// every boundary edge, softening only the outer edge — but fans the solid part
+// from `center`. One mesh per shape: no pieces meeting (no seam) and no pixel
+// painted twice, so it stays even at low opacity.
+void AddStarPolyFilled(ImDrawList* dl, const ImVec2& center,
+                       const cursor_finder::MarkerPoint* points, int count, ImU32 col)
+{
+    if (count < 3 || (col & IM_COL32_A_MASK) == 0) { return; }
+    const ImVec2 uv = ImGui::GetFontTexUvWhitePixel();
+    auto at = [&](int i) { return ImVec2(points[i].x, points[i].y); };
+
+    if (!(dl->Flags & ImDrawListFlags_AntiAliasedFill))
+    {
+        dl->PrimReserve(count * 3, count + 1);
+        const unsigned int centre_idx = dl->_VtxCurrentIdx;
+        dl->PrimWriteVtx(center, uv, col);
+        for (int i = 0; i < count; ++i) { dl->PrimWriteVtx(at(i), uv, col); }
+        for (int i0 = count - 1, i1 = 0; i1 < count; i0 = i1++)
+        {
+            dl->PrimWriteIdx(static_cast<ImDrawIdx>(centre_idx));
+            dl->PrimWriteIdx(static_cast<ImDrawIdx>(centre_idx + 1 + i0));
+            dl->PrimWriteIdx(static_cast<ImDrawIdx>(centre_idx + 1 + i1));
+        }
+        return;
+    }
+
+    // The outward unit normal of edge i -> i + 1 (clockwise winding: (dy, -dx)).
+    auto edge_normal = [&](int i) {
+        const ImVec2 p0 = at(i);
+        const ImVec2 p1 = at((i + 1) % count);
+        float dx = p1.x - p0.x, dy = p1.y - p0.y;
+        const float d2 = dx * dx + dy * dy;
+        if (d2 > 0.0f) { const float inv = 1.0f / std::sqrt(d2); dx *= inv; dy *= inv; }
+        return ImVec2(dy, -dx);
+    };
+
+    const float aa = dl->_FringeScale;
+    const ImU32 col_trans = col & ~IM_COL32_A_MASK;
+    dl->PrimReserve(count * 3 + count * 6, 1 + count * 2);
+    // Vertex layout: the centre, then per boundary point an inner (solid) and an
+    // outer (transparent) vertex half the fringe either side of it.
+    const unsigned int centre_idx = dl->_VtxCurrentIdx;
+    const unsigned int inner_idx  = centre_idx + 1;
+    dl->PrimWriteVtx(center, uv, col);
+    for (int i = 0; i < count; ++i)
+    {
+        // Average the two edge normals, as AddConvexPolyFilled does (IM_FIXNORMAL2F).
+        const ImVec2 n0 = edge_normal((i + count - 1) % count);
+        const ImVec2 n1 = edge_normal(i);
+        float dm_x = (n0.x + n1.x) * 0.5f, dm_y = (n0.y + n1.y) * 0.5f;
+        float d2 = dm_x * dm_x + dm_y * dm_y;
+        if (d2 < 0.5f) { d2 = 0.5f; }
+        dm_x *= aa * 0.5f / d2;
+        dm_y *= aa * 0.5f / d2;
+        const ImVec2 p = at(i);
+        dl->PrimWriteVtx(ImVec2(p.x - dm_x, p.y - dm_y), uv, col);       // inner
+        dl->PrimWriteVtx(ImVec2(p.x + dm_x, p.y + dm_y), uv, col_trans); // outer
+    }
+    for (int i0 = count - 1, i1 = 0; i1 < count; i0 = i1++)
+    {
+        const ImDrawIdx in0  = static_cast<ImDrawIdx>(inner_idx + 2 * i0);
+        const ImDrawIdx in1  = static_cast<ImDrawIdx>(inner_idx + 2 * i1);
+        const ImDrawIdx out0 = static_cast<ImDrawIdx>(in0 + 1);
+        const ImDrawIdx out1 = static_cast<ImDrawIdx>(in1 + 1);
+        // Solid fan triangle from the centre.
+        dl->PrimWriteIdx(static_cast<ImDrawIdx>(centre_idx));
+        dl->PrimWriteIdx(in0);
+        dl->PrimWriteIdx(in1);
+        // Fringe quad along the edge.
+        dl->PrimWriteIdx(in1);  dl->PrimWriteIdx(in0);  dl->PrimWriteIdx(out0);
+        dl->PrimWriteIdx(out0); dl->PrimWriteIdx(out1); dl->PrimWriteIdx(in1);
+    }
+}
+
+// Segments for the drawn presets' centre dots (a few px across at most).
+constexpr int kDotSegments = 32;
+
+// The Corner Reticle, drawn in code at marker size `size` (geometry from
+// cursor_finder::corner_reticle_geometry): the outline layer first (when
+// `draw_outline`), then the colour layer — each the four brackets, stroked with
+// round caps and a round outer corner (cursor_finder::bracket_stroke_boundary,
+// filled as one mesh per bracket; ImGui's thick polyline would mitre the corner
+// square), and the centre dot. Used for the marker and its style tile (colour only).
+void DrawCornerReticle(ImDrawList* dl, const ImVec2& center, float size,
+                       ImU32 colour, bool draw_outline, ImU32 outline_colour)
+{
+    const cursor_finder::CornerReticleGeometry g =
+        cursor_finder::corner_reticle_geometry(center.x, center.y, size);
+    if (g.stroke <= 0.0f) { return; }
+    const ImVec2 dot(g.dot_center.x, g.dot_center.y);
+    auto draw_layer = [&](float stroke, float dot_radius, ImU32 col) {
+        for (const auto& bracket : g.brackets)
+        {
+            const cursor_finder::BracketBoundary boundary =
+                cursor_finder::bracket_stroke_boundary(bracket, stroke);
+            AddStarPolyFilled(dl, ImVec2(bracket[1].x, bracket[1].y),
+                              boundary.points, boundary.count, col);
+        }
+        dl->AddCircleFilled(dot, dot_radius, col, kDotSegments);
+    };
+    if (draw_outline) { draw_layer(g.outline_stroke, g.outline_dot_radius, outline_colour); }
+    draw_layer(g.stroke, g.dot_radius, colour);
+}
+
+// The Beacon Crosshair, drawn in code at marker size `size` (geometry from
+// cursor_finder::beacon_crosshair_geometry): the outline layer first (when
+// `draw_outline`) — the four enlarged triangles with their tips cut, and the
+// outline dot — then the colour triangles and dot. All convex and wound clockwise,
+// so AddConvexPolyFilled fills them. Used for the marker and its style tile
+// (colour only).
+void DrawBeaconCrosshair(ImDrawList* dl, const ImVec2& center, float size,
+                         ImU32 colour, bool draw_outline, ImU32 outline_colour)
+{
+    const cursor_finder::BeaconCrosshairGeometry g =
+        cursor_finder::beacon_crosshair_geometry(center.x, center.y, size);
+    if (g.dot_radius <= 0.0f) { return; }
+    const ImVec2 dot(g.dot_center.x, g.dot_center.y);
+    if (draw_outline)
+    {
+        for (const auto& shape : g.outline_shapes)
+        {
+            const ImVec2 pts[4] = {
+                ImVec2(shape[0].x, shape[0].y), ImVec2(shape[1].x, shape[1].y),
+                ImVec2(shape[2].x, shape[2].y), ImVec2(shape[3].x, shape[3].y),
+            };
+            dl->AddConvexPolyFilled(pts, 4, outline_colour);
+        }
+        dl->AddCircleFilled(dot, g.outline_dot_radius, outline_colour, kDotSegments);
+    }
+    for (const auto& tri : g.triangles)
+    {
+        const ImVec2 pts[3] = {
+            ImVec2(tri[0].x, tri[0].y), ImVec2(tri[1].x, tri[1].y), ImVec2(tri[2].x, tri[2].y),
+        };
+        dl->AddConvexPolyFilled(pts, 3, colour);
+    }
+    dl->AddCircleFilled(dot, g.dot_radius, colour, kDotSegments);
+}
+
+// Draw a preset that is drawn in code (its kPresetTex slot is empty) with its own
+// routine. Shared by the marker, the panel preview and the style tiles.
+void DrawCodePreset(ImDrawList* dl, cursor_finder::Preset preset, const ImVec2& center,
+                    float size, ImU32 colour, bool draw_outline, ImU32 outline_colour)
+{
+    switch (preset)
+    {
+        case cursor_finder::Preset::CornerReticle:
+            DrawCornerReticle(dl, center, size, colour, draw_outline, outline_colour);
+            break;
+        case cursor_finder::Preset::BeaconCrosshair:
+            DrawBeaconCrosshair(dl, center, size, colour, draw_outline, outline_colour);
+            break;
+        case cursor_finder::Preset::PulseRing:
+            DrawPulseRing(dl, center, size, colour, draw_outline, outline_colour);
+            break;
+        default:
+            // Fallback, not reached today: the other presets draw from their
+            // textures (PresetUsesImages). A preset whose kPresetTex slot is emptied
+            // needs its own case above; until then it draws nothing, which shows at
+            // once, rather than a Pulse Ring that would pass for deliberate.
+            break;
+    }
+}
+
 // Draw the selected preset centered on `center` at the settings' size: an
 // optional translucent fill disc, then the outline layer (if enabled), then the
-// colour layer on top — each a white mask tinted at draw time, or, for the Pulse
-// Ring, two strokes drawn in code (no texture, so it draws from the first frame).
+// colour layer on top — each a white mask tinted at draw time, or, for a preset
+// drawn in code (Pulse Ring, Corner Reticle, Beacon Crosshair), its shapes drawn
+// with the draw list (no texture, so it draws from the first frame).
 // Falls back to the code-drawn ring for any frame the layer textures are not
 // ready. Drawn OVER the pointer — never replacing it.
 void DrawMarker(ImDrawList* dl, const ImVec2& center, const cursor_finder::CursorSettings& s)
@@ -482,10 +650,10 @@ void DrawMarker(ImDrawList* dl, const ImVec2& center, const cursor_finder::Curso
     const ImU32 ring_colour  = LayerTint(s.colour, s.opacity_pct);
     const ImU32 ring_outline = OutlineTint(s.outline_colour, s.opacity_pct);
 
-    // Presets drawn in code (the Pulse Ring) never touch a texture.
+    // Presets drawn in code never touch a texture.
     if (!PresetUsesImages(idx))
     {
-        DrawPulseRing(dl, center, size, ring_colour, draw_outline, ring_outline);
+        DrawCodePreset(dl, s.preset, center, size, ring_colour, draw_outline, ring_outline);
         return;
     }
 
@@ -820,9 +988,10 @@ void RenderPanel()
                 // signature hue so each tile shows in its signature colour (Ring
                 // magenta, Reticle cyan, Cross white, Dash violet, Halo teal). If
                 // the texture's Resource isn't uploaded yet, the icon area is left
-                // blank (no hand-drawn fallback). A preset drawn in code (the Pulse
-                // Ring) is drawn by the same routine as its marker, at icon size,
-                // colour stroke only — as the tile shows only the colour layer.
+                // blank (no hand-drawn fallback). A preset drawn in code (Pulse Ring,
+                // Corner Reticle, Beacon Crosshair) is drawn by the same routine as
+                // its marker, at icon size, colour layer only — as the tile shows
+                // only the colour layer.
                 const float cx = tile_pos.x + tile_w * 0.5f;
                 const float icon_half = tile_w * 0.26f; // 0.52 wide, centered
                 const float icon_cy   = tile_pos.y + tile_w * 0.40f;
@@ -832,8 +1001,8 @@ void RenderPanel()
                 const ImU32 tint = IM_COL32(hue.r, hue.g, hue.b, 255);
                 if (!PresetUsesImages(i))
                 {
-                    DrawPulseRing(sdl, ImVec2(cx, icon_cy), icon_half * 2.0f, tint,
-                                  /*draw_outline=*/false, 0);
+                    DrawCodePreset(sdl, kPresets[i].p, ImVec2(cx, icon_cy), icon_half * 2.0f,
+                                   tint, /*draw_outline=*/false, 0);
                 }
                 else if (Texture_t* t = ResolveTex(i, /*colour_layer=*/true);
                          t && t->Resource)

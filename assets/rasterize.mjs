@@ -15,8 +15,9 @@
 //   node rasterize.mjs
 //
 // Every *.svg in ./svg is rendered to ./presets/<same-name>.png at OUT_SIZE,
-// except the Pulse Ring's: it is drawn in code (src/entry.cpp, DrawPulseRing),
-// so its SVGs stay only as the design source of its geometry.
+// except those of the presets drawn in code (src/entry.cpp: DrawPulseRing,
+// DrawCornerReticle, DrawBeaconCrosshair): their SVGs stay only as the design
+// source of their geometry.
 
 import { readdirSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join, basename } from 'node:path';
@@ -28,7 +29,7 @@ const SRC = join(HERE, 'svg');
 const OUT = join(HERE, 'presets');
 const OUT_SIZE = 256; // px, square (design viewBox is 200x200)
 // Presets drawn in code — their SVGs are not rasterized.
-const DRAWN_IN_CODE = ['pulse-ring-'];
+const DRAWN_IN_CODE = ['pulse-ring-', 'corner-reticle-', 'beacon-crosshair-'];
 
 mkdirSync(OUT, { recursive: true });
 
