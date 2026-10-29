@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Emit icon_textures_data.h — the QuickAccess icon PNGs as C byte arrays.
 
-Cursor Finder loads these via Textures_GetOrCreateFromMemory (the same path its
-preset masks already use — no Windows resource lookup, no module handle). This
+Cursor Finder loads these via Textures_GetOrCreateFromMemory (the same path as
+its other embedded images — no Windows resource lookup, no module handle). This
 sidesteps the FindResource "resource not found" failure the .rc/RCDATA path
 hits in this Nexus/CrossOver build. The icon PNGs are rasterized from the
 Cursor Finder icon SVGs (normal + hover) at 128x128 via a browser canvas.

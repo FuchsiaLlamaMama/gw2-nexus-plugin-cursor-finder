@@ -43,6 +43,20 @@ MarkerPoint intersect(const Line& l1, const Line& l2)
     return MarkerPoint{l1.p.x + l1.d.x * t, l1.p.y + l1.d.y * t};
 }
 
+// The point at `angle` on the circle of `radius` about `c` (angle 0 at 3 o'clock,
+// growing clockwise on screen).
+MarkerPoint on_circle(const MarkerPoint& c, float radius, float angle)
+{
+    return MarkerPoint{c.x + radius * std::cos(angle), c.y + radius * std::sin(angle)};
+}
+
+// The angle of step k of `steps` from `from` to `to`, landing exactly on both ends.
+float step_angle(float from, float to, int k, int steps)
+{
+    if (k == steps) { return to; }
+    return from + (to - from) * static_cast<float>(k) / static_cast<float>(steps);
+}
+
 } // namespace
 
 MarkerRect centered_marker_rect(float center_x, float center_y, float size)
@@ -226,6 +240,105 @@ BeaconCrosshairGeometry beacon_crosshair_geometry(float center_x, float center_y
     g.dot_center         = MarkerPoint{center_x, center_y};
     g.dot_radius         = kDesignDotRadius * scale;
     g.outline_dot_radius = g.dot_radius + kMarkerOutlineBandPx;
+    return g;
+}
+
+RadarDashGeometry radar_dash_geometry(float center_x, float center_y, float size)
+{
+    if (size <= 0.0f) { return RadarDashGeometry{}; }
+    // Design values in its 200-unit box: circle r 72, stroke 11, dash 26 on and 22
+    // off, dot r 6.
+    constexpr float kDesignRadius    = 72.0f;
+    constexpr float kDesignStroke    = 11.0f;
+    constexpr float kDesignDotRadius = 6.0f;
+    constexpr float kDashOn          = 26.0f;
+    constexpr float kDashOff         = 22.0f;
+    const float scale  = size / kDesignBox;
+    const float period = 4.0f * kHalfPi / static_cast<float>(kRadarDashCount);
+    const float dash   = period * kDashOn / (kDashOn + kDashOff);
+    RadarDashGeometry g;
+    g.center = MarkerPoint{center_x, center_y};
+    for (int i = 0; i < kRadarDashCount; ++i)
+    {
+        g.dashes[i].start = period * static_cast<float>(i);
+        g.dashes[i].end   = g.dashes[i].start + dash;
+    }
+    g.radius             = kDesignRadius * scale;
+    g.stroke             = kDesignStroke * scale;
+    g.dot_radius         = kDesignDotRadius * scale;
+    g.outline_stroke     = kMarkerOutlineBandPx;
+    // Each outline arc lies edge to edge with the colour: its centre is half its
+    // width beyond the colour's edge.
+    g.outline_outer_radius = g.radius + 0.5f * g.stroke + 0.5f * kMarkerOutlineBandPx;
+    g.outline_inner_radius = g.radius - 0.5f * g.stroke - 0.5f * kMarkerOutlineBandPx;
+    g.outline_dot_radius = g.dot_radius + kMarkerOutlineBandPx;
+    return g;
+}
+
+DashArcPoints dash_arc_points(const MarkerPoint& center, float radius, const DashArc& arc)
+{
+    DashArcPoints out;
+    if (radius <= 0.0f) { return out; }
+    for (int k = 0; k <= kDashArcSteps; ++k)
+    {
+        out.points[out.count++] =
+            on_circle(center, radius, step_angle(arc.start, arc.end, k, kDashArcSteps));
+    }
+    return out;
+}
+
+DashBoundary dash_stroke_boundary(const MarkerPoint& center, float radius, float stroke,
+                                  const DashArc& arc)
+{
+    DashBoundary out;
+    if (radius <= 0.0f || stroke <= 0.0f) { return out; }
+    const float h = stroke * 0.5f;
+    const float pi = 2.0f * kHalfPi;
+    out.fan_center = on_circle(center, radius, 0.5f * (arc.start + arc.end));
+    auto push = [&](const MarkerPoint& p) {
+        if (out.count < kDashBoundaryMaxPoints) { out.points[out.count++] = p; }
+    };
+    // Walking by growing angle (about the ring centre on the outer side, about each
+    // cap's centre round a cap) winds the polygon clockwise on screen.
+    // 1. The outer side of the body, start to end, both corners included.
+    for (int k = 0; k <= kDashArcSteps; ++k)
+    {
+        push(on_circle(center, radius + h, step_angle(arc.start, arc.end, k, kDashArcSteps)));
+    }
+    // 2. The end cap: a half circle about the body's end, from its outer corner
+    //    (pointing away from the ring centre) to its inner corner. Only the points
+    //    between; the corners belong to the sides.
+    const MarkerPoint end = on_circle(center, radius, arc.end);
+    for (int k = 1; k < kDashCapSteps; ++k)
+    {
+        push(on_circle(end, h, step_angle(arc.end, arc.end + pi, k, kDashCapSteps)));
+    }
+    // 3. The inner side of the body, end back to start, both corners included.
+    for (int k = 0; k <= kDashArcSteps; ++k)
+    {
+        push(on_circle(center, radius - h, step_angle(arc.end, arc.start, k, kDashArcSteps)));
+    }
+    // 4. The start cap, from its inner corner round to its outer corner.
+    const MarkerPoint start = on_circle(center, radius, arc.start);
+    for (int k = 1; k < kDashCapSteps; ++k)
+    {
+        push(on_circle(start, h,
+                       step_angle(arc.start + pi, arc.start + 2.0f * pi, k, kDashCapSteps)));
+    }
+    return out;
+}
+
+SoftHaloGeometry soft_halo_geometry(float size)
+{
+    if (size <= 0.0f) { return SoftHaloGeometry{}; }
+    // Design values in its 200-unit box: disc r 96; alpha 0.92 at the centre, 0.5
+    // at 52 % of the radius, 0 at the edge.
+    constexpr float kDesignRadius = 96.0f;
+    SoftHaloGeometry g;
+    g.radius   = kDesignRadius * size / kDesignBox;
+    g.stops[0] = SoftHaloStop{0.0f, 0.92f};
+    g.stops[1] = SoftHaloStop{0.52f, 0.5f};
+    g.stops[2] = SoftHaloStop{1.0f, 0.0f};
     return g;
 }
 

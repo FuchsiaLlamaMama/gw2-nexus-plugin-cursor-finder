@@ -8,16 +8,11 @@
 // versioned JSON in the addon directory (write-through — durability does not
 // depend on Unload; see core/cursor_finder_store.h).
 //
-// The Pulse Ring, Corner Reticle and Beacon Crosshair are drawn in code with the
-// ImGui draw list (stroked circles, filled bracket meshes, filled triangles),
-// outline under colour, sharp at any size. The other presets are
-// still drawn from layered white/alpha mask textures: a
-// tintable outline layer + a tintable colour layer, embedded as C byte arrays
-// (assets/preset_textures_data.h) and loaded via Textures_GetOrCreateFromMemory.
-// Each layer is tinted at draw time with AddImage, so one PNG serves any colour.
+// All five presets are drawn in code with the ImGui draw list (stroked circles,
+// filled bracket and dash meshes, filled triangles, a graded halo mesh), each
+// layer tinted with the user's colour, sharp at any size and from the first frame.
 // Draw order is outline UNDER colour (the outline reads as a dark halo behind the
-// brighter core). If a texture is not ready yet, the frame falls back to the
-// code-drawn ring so the marker never blanks.
+// brighter core).
 //
 // This file is Windows/MSVC-only (Nexus.h + ImGui + Windows.h). The testable
 // logic (settings, migration, geometry) lives in cursor-finder-core, which builds and
@@ -41,7 +36,6 @@
 #include "core/clip_freeze.h"
 #include "core/visibility.h"
 #include "mumble_link.h"
-#include "../assets/preset_textures_data.h"
 #include "../assets/window_bg_data.h"
 #include "../assets/icon_data.h"
 #include "../assets/pointer_data.h"
@@ -73,7 +67,7 @@ constexpr const char* kDefaultBind   = "(null)";
 // brightened cream hover) are embedded as raw byte arrays in
 // ../assets/icon_textures_data.h and registered under these addon-owned
 // identifiers via Textures_GetOrCreateFromMemory (see EnsureQuickAccessIcon) — the
-// same memory path the preset masks use. NOT the .rc/RCDATA + FindResource path:
+// same memory path as the other embedded images. NOT the .rc/RCDATA + FindResource path:
 // FindResource does not resolve embedded resources in this Nexus/CrossOver build.
 // Registered from the render loop, not AddonLoad: the
 // textures resolve only after the render device is up, and QuickAccess_Add binds
@@ -122,31 +116,7 @@ RECT g_ClipRect{};
 // case where focus is lost mid-hold so the button-up is never seen.
 std::atomic<bool> g_FocusLost{false}; // game lost focus / alt-tab / kill-focus
 
-// --- preset layer texture table ----------------------------------------------
-
-// One entry per preset (indexed by (int)cursor_finder::Preset): the Nexus texture
-// identifier + embedded PNG bytes (from preset_textures_data.h) for each layer.
-// Loaded via Textures_GetOrCreateFromMemory — no Windows resource lookup.
-// A preset drawn in code has an EMPTY slot (null data) — kept, not deleted, so
-// the table stays indexed by preset number.
-struct LayerTex {
-    const char*          id;
-    const unsigned char* data;
-    unsigned int         size;
-};
-struct PresetTex {
-    LayerTex outline;
-    LayerTex colour;
-};
-const PresetTex kPresetTex[] = {
-    { {nullptr, nullptr, 0u}, {nullptr, nullptr, 0u} }, // Pulse Ring: drawn in code (DrawPulseRing)
-    { {nullptr, nullptr, 0u}, {nullptr, nullptr, 0u} }, // Corner Reticle: drawn in code (DrawCornerReticle)
-    { {nullptr, nullptr, 0u}, {nullptr, nullptr, 0u} }, // Beacon Crosshair: drawn in code (DrawBeaconCrosshair)
-    { {"TEX_CURSOR_FINDER_RADAR_DASH_OUTLINE",       cursor_finder_art::kRadarDashOutline,       cursor_finder_art::kRadarDashOutline_len},
-      {"TEX_CURSOR_FINDER_RADAR_DASH_COLOUR",        cursor_finder_art::kRadarDashColour,        cursor_finder_art::kRadarDashColour_len} },
-    { {"TEX_CURSOR_FINDER_SOFT_HALO_OUTLINE",        cursor_finder_art::kSoftHaloOutline,        cursor_finder_art::kSoftHaloOutline_len},
-      {"TEX_CURSOR_FINDER_SOFT_HALO_COLOUR",         cursor_finder_art::kSoftHaloColour,         cursor_finder_art::kSoftHaloColour_len} },
-};
+// --- per-preset capabilities ------------------------------------------------
 
 // Per-preset capabilities — the presets are geometrically different, so outline
 // and fill do not apply uniformly. Soft Halo is a soft graded glow: ONE colour,
@@ -170,47 +140,10 @@ constexpr PresetCaps kPresetCaps[] = {
     /* SoftHalo        */ { false, FillShape::None,   0.00f },
 };
 
-// Cached preset textures, filled lazily by Textures_GetOrCreateFromMemory from
-// the embedded PNG bytes. Indexed by (int)Preset.
-struct PresetTexCache {
-    Texture_t* outline = nullptr;
-    Texture_t* colour  = nullptr;
-};
-PresetTexCache g_Tex[5];
-
-// Whether a preset is still drawn from layer images (its kPresetTex slot carries
-// data). False for presets drawn in code — callers never resolve a texture for them.
-bool PresetUsesImages(int idx)
-{
-    return kPresetTex[idx].colour.data != nullptr;
-}
-
-// Resolve a preset layer's texture: cache once, else decode the embedded PNG
-// bytes via Textures_GetOrCreateFromMemory (no resource lookup / module handle).
-// Returns nullptr (or a texture whose Resource is not ready yet) — the caller
-// falls back to the code-drawn ring for that frame. Never called for a preset
-// drawn in code (callers check PresetUsesImages); the guard below is a backstop.
-Texture_t* ResolveTex(int idx, bool colour_layer)
-{
-    Texture_t*& slot = colour_layer ? g_Tex[idx].colour : g_Tex[idx].outline;
-    if (slot && slot->Resource) { return slot; }
-    const LayerTex& lt = colour_layer ? kPresetTex[idx].colour : kPresetTex[idx].outline;
-    if (!lt.data) { return nullptr; }
-    if (g_API && g_API->Textures_GetOrCreateFromMemory)
-    {
-        if (Texture_t* t = g_API->Textures_GetOrCreateFromMemory(
-                lt.id, const_cast<unsigned char*>(lt.data), lt.size))
-        {
-            slot = t;
-        }
-    }
-    return slot;
-}
-
 // Resolve the window-background texture: the mottled parchment/rust card fill
 // (assets/textures). Cached in a
 // single static and decoded once from the embedded PNG via
-// Textures_GetOrCreateFromMemory — the SAME memory loader as the preset layers;
+// Textures_GetOrCreateFromMemory — the SAME memory loader as the icons;
 // RCDATA / TryGetBundledTexture failed for this DLL. Returns nullptr (or a
 // texture whose Resource is not ready yet) until the upload completes; the caller
 // falls back to the primitive DrawThemedFrame for that frame.
@@ -233,7 +166,7 @@ Texture_t* ResolveWindowTex()
 
 // Resolve the title-chip icon texture: the branded
 // Cursor Finder icon (gold ring + pointer), embedded as C bytes (icon_data.h).
-// Same cached memory loader as the window-background/preset layers —
+// Same cached memory loader as the window background —
 // NOT RCDATA. Returns nullptr (or a texture whose Resource is not ready yet)
 // until the upload completes; the caller falls back to the drawn pointer glyph
 // for that frame.
@@ -256,7 +189,7 @@ Texture_t* ResolveIconTex()
 
 // Resolve the preview pointer texture: the branded gold
 // arrow (pointer_data.h, 93×128 PNG, transparent bg), embedded as C bytes and
-// loaded via the SAME cached memory loader as the icon/window/preset layers —
+// loaded via the SAME cached memory loader as the icon/window background —
 // NOT RCDATA. Returns nullptr (or a texture whose Resource is not ready yet)
 // until the upload completes; the caller falls back to the drawn pointer glyph
 // for that frame.
@@ -303,7 +236,7 @@ constexpr float kTitleBarHeight = 58.0f;
 
 // A texture is "resolved" — safe to hand to the one-shot QuickAccess_Add — once
 // Nexus has created its backing resource AND reported real dimensions. Stricter
-// than the preset draw path's Resource-only check: QuickAccess_Add binds the icon
+// than the other textures' Resource-only check: QuickAccess_Add binds the icon
 // once at call time, so registering against a half-created texture leaves the
 // toolbar button on Nexus's fallback glyph (observed in-game).
 bool IconResolved(const Texture_t* t)
@@ -423,8 +356,7 @@ ImVec2 CurrentPointer()
 // `draw_outline`), then the colour stroke on top — two circles of 96 segments.
 // ImGui v1.80's AddCircle strokes at radius - 0.5, so the radius passed is the
 // design radius + 0.5 to put the stroke centre on the design radius. Used for the
-// Pulse Ring marker, its style tile (colour only), and as each image preset's
-// fallback for the frames before its texture is ready.
+// Pulse Ring marker and its style tile (colour only).
 void DrawPulseRing(ImDrawList* dl, const ImVec2& center, float size,
                    ImU32 colour, bool draw_outline, ImU32 outline_colour)
 {
@@ -582,46 +514,147 @@ void DrawBeaconCrosshair(ImDrawList* dl, const ImVec2& center, float size,
     dl->AddCircleFilled(dot, g.dot_radius, colour, kDotSegments);
 }
 
-// Draw a preset that is drawn in code (its kPresetTex slot is empty) with its own
-// routine. Shared by the marker, the panel preview and the style tiles.
+// The Radar Dash, drawn in code at marker size `size` (geometry from
+// cursor_finder::radar_dash_geometry): the outline layer first (when
+// `draw_outline`) — for each dash, two 2 px arcs with flat ends along its outer
+// and inner edge, spanning only the dash's body, so they never run round the round
+// ends or lie under the colour (which would show through below full opacity) and
+// the gaps between dashes stay open; then the outline dot. Then the colour layer:
+// each dash a round-capped arc filled as one mesh (cursor_finder::
+// dash_stroke_boundary: no seam where a cap meets the body, nothing painted
+// twice), and the dot. Used for the marker and its style tile (colour only).
+void DrawRadarDash(ImDrawList* dl, const ImVec2& center, float size,
+                   ImU32 colour, bool draw_outline, ImU32 outline_colour)
+{
+    const cursor_finder::RadarDashGeometry g =
+        cursor_finder::radar_dash_geometry(center.x, center.y, size);
+    if (g.stroke <= 0.0f || (colour & IM_COL32_A_MASK) == 0) { return; }
+    const ImVec2 dot(g.center.x, g.center.y);
+    if (draw_outline)
+    {
+        const float radii[2] = {g.outline_outer_radius, g.outline_inner_radius};
+        for (const cursor_finder::DashArc& dash : g.dashes)
+        {
+            for (const float radius : radii)
+            {
+                const cursor_finder::DashArcPoints arc =
+                    cursor_finder::dash_arc_points(g.center, radius, dash);
+                ImVec2 pts[cursor_finder::kDashArcMaxPoints];
+                for (int k = 0; k < arc.count; ++k)
+                {
+                    pts[k] = ImVec2(arc.points[k].x, arc.points[k].y);
+                }
+                // An open polyline: ImGui softens its sides only, its ends stay flat.
+                dl->AddPolyline(pts, arc.count, outline_colour, /*closed=*/false,
+                                g.outline_stroke);
+            }
+        }
+        dl->AddCircleFilled(dot, g.outline_dot_radius, outline_colour, kDotSegments);
+    }
+    for (const cursor_finder::DashArc& dash : g.dashes)
+    {
+        const cursor_finder::DashBoundary boundary =
+            cursor_finder::dash_stroke_boundary(g.center, g.radius, g.stroke, dash);
+        AddStarPolyFilled(dl, ImVec2(boundary.fan_center.x, boundary.fan_center.y),
+                          boundary.points, boundary.count, colour);
+    }
+    dl->AddCircleFilled(dot, g.dot_radius, colour, kDotSegments);
+}
+
+// Segments round the Soft Halo's rings.
+constexpr int kHaloSegments = 96;
+
+// The Soft Halo, drawn in code at marker size `size` (geometry from
+// cursor_finder::soft_halo_geometry): one mesh, a triangle fan from the centre
+// out to a ring at each alpha stop, the vertices carrying the stop's alpha times
+// the tint's, so the GPU blends the fall-off between the rings. The last stop is
+// transparent, so the edge needs no softening. No outline. Used for the marker and
+// its style tile.
+void DrawSoftHalo(ImDrawList* dl, const ImVec2& center, float size, ImU32 colour)
+{
+    const cursor_finder::SoftHaloGeometry g = cursor_finder::soft_halo_geometry(size);
+    if (g.radius <= 0.0f || (colour & IM_COL32_A_MASK) == 0) { return; }
+    constexpr int n     = kHaloSegments;
+    constexpr int rings = cursor_finder::kSoftHaloStops - 1; // stop 0 is the centre
+    const ImVec2 uv = ImGui::GetFontTexUvWhitePixel();
+    const float tint_alpha = static_cast<float>((colour >> IM_COL32_A_SHIFT) & 0xFF);
+    auto stop_colour = [&](const cursor_finder::SoftHaloStop& stop) {
+        const ImU32 a = static_cast<ImU32>(tint_alpha * stop.alpha + 0.5f);
+        return (colour & ~IM_COL32_A_MASK) | (a << IM_COL32_A_SHIFT);
+    };
+
+    // Vertex layout: the centre, then `n` vertices per ring, innermost first.
+    dl->PrimReserve(n * 3 + (rings - 1) * n * 6, 1 + rings * n);
+    const unsigned int centre_idx = dl->_VtxCurrentIdx;
+    dl->PrimWriteVtx(center, uv, stop_colour(g.stops[0]));
+    for (int r = 1; r <= rings; ++r)
+    {
+        const float radius = g.radius * g.stops[r].at;
+        const ImU32 col = stop_colour(g.stops[r]);
+        for (int i = 0; i < n; ++i)
+        {
+            const float a = 6.28318530718f * static_cast<float>(i) / static_cast<float>(n);
+            dl->PrimWriteVtx(ImVec2(center.x + radius * std::cos(a),
+                                    center.y + radius * std::sin(a)), uv, col);
+        }
+    }
+    auto ring_vtx = [&](int r, int i) {
+        return static_cast<ImDrawIdx>(centre_idx + 1u + static_cast<unsigned int>((r - 1) * n + i % n));
+    };
+    for (int i = 0; i < n; ++i)
+    {
+        // The fan from the centre to the first ring.
+        dl->PrimWriteIdx(static_cast<ImDrawIdx>(centre_idx));
+        dl->PrimWriteIdx(ring_vtx(1, i));
+        dl->PrimWriteIdx(ring_vtx(1, i + 1));
+        // A quad between each ring and the next one out.
+        for (int r = 1; r < rings; ++r)
+        {
+            dl->PrimWriteIdx(ring_vtx(r, i));
+            dl->PrimWriteIdx(ring_vtx(r + 1, i));
+            dl->PrimWriteIdx(ring_vtx(r + 1, i + 1));
+            dl->PrimWriteIdx(ring_vtx(r, i));
+            dl->PrimWriteIdx(ring_vtx(r + 1, i + 1));
+            dl->PrimWriteIdx(ring_vtx(r, i + 1));
+        }
+    }
+}
+
+// Draw a preset with its own routine. Shared by the marker, the panel preview and
+// the style tiles.
 void DrawCodePreset(ImDrawList* dl, cursor_finder::Preset preset, const ImVec2& center,
                     float size, ImU32 colour, bool draw_outline, ImU32 outline_colour)
 {
     switch (preset)
     {
+        case cursor_finder::Preset::PulseRing:
+            DrawPulseRing(dl, center, size, colour, draw_outline, outline_colour);
+            break;
         case cursor_finder::Preset::CornerReticle:
             DrawCornerReticle(dl, center, size, colour, draw_outline, outline_colour);
             break;
         case cursor_finder::Preset::BeaconCrosshair:
             DrawBeaconCrosshair(dl, center, size, colour, draw_outline, outline_colour);
             break;
-        case cursor_finder::Preset::PulseRing:
-            DrawPulseRing(dl, center, size, colour, draw_outline, outline_colour);
+        case cursor_finder::Preset::RadarDash:
+            DrawRadarDash(dl, center, size, colour, draw_outline, outline_colour);
             break;
-        default:
-            // Fallback, not reached today: the other presets draw from their
-            // textures (PresetUsesImages). A preset whose kPresetTex slot is emptied
-            // needs its own case above; until then it draws nothing, which shows at
-            // once, rather than a Pulse Ring that would pass for deliberate.
+        case cursor_finder::Preset::SoftHalo:
+            DrawSoftHalo(dl, center, size, colour); // no outline
             break;
     }
 }
 
 // Draw the selected preset centered on `center` at the settings' size: an
 // optional translucent fill disc, then the outline layer (if enabled), then the
-// colour layer on top — each a white mask tinted at draw time, or, for a preset
-// drawn in code (Pulse Ring, Corner Reticle, Beacon Crosshair), its shapes drawn
-// with the draw list (no texture, so it draws from the first frame).
-// Falls back to the code-drawn ring for any frame the layer textures are not
-// ready. Drawn OVER the pointer — never replacing it.
+// colour layer on top, all drawn with the draw list (no texture, so it draws from
+// the first frame). Drawn OVER the pointer — never replacing it.
 void DrawMarker(ImDrawList* dl, const ImVec2& center, const cursor_finder::CursorSettings& s)
 {
     const float size = static_cast<float>(s.size_px);
     const cursor_finder::MarkerRect rect =
         cursor_finder::centered_marker_rect(center.x, center.y, size);
     if (rect.width() <= 0.0f) { return; }
-    const ImVec2 p_min(rect.min_x, rect.min_y);
-    const ImVec2 p_max(rect.max_x, rect.max_y);
 
     const int idx = static_cast<int>(s.preset);
     const PresetCaps& caps = kPresetCaps[idx];
@@ -649,33 +682,7 @@ void DrawMarker(ImDrawList* dl, const ImVec2& center, const cursor_finder::Curso
 
     const ImU32 ring_colour  = LayerTint(s.colour, s.opacity_pct);
     const ImU32 ring_outline = OutlineTint(s.outline_colour, s.opacity_pct);
-
-    // Presets drawn in code never touch a texture.
-    if (!PresetUsesImages(idx))
-    {
-        DrawCodePreset(dl, s.preset, center, size, ring_colour, draw_outline, ring_outline);
-        return;
-    }
-
-    Texture_t* colour_tex  = ResolveTex(idx, /*colour_layer=*/true);
-    Texture_t* outline_tex = draw_outline ? ResolveTex(idx, /*colour_layer=*/false) : nullptr;
-
-    // Until the colour layer is ready, keep the marker visible with the drawn ring.
-    if (!colour_tex || !colour_tex->Resource)
-    {
-        DrawPulseRing(dl, center, size, ring_colour, draw_outline, ring_outline);
-        return;
-    }
-
-    // Outline UNDER colour (the outline reads as a dark halo behind the core).
-    if (draw_outline && outline_tex && outline_tex->Resource)
-    {
-        dl->AddImage(static_cast<ImTextureID>(outline_tex->Resource), p_min, p_max,
-                     ImVec2(0, 0), ImVec2(1, 1),
-                     LayerTint(s.outline_colour, s.opacity_pct));
-    }
-    dl->AddImage(static_cast<ImTextureID>(colour_tex->Resource), p_min, p_max,
-                 ImVec2(0, 0), ImVec2(1, 1), LayerTint(s.colour, s.opacity_pct));
+    DrawCodePreset(dl, s.preset, center, size, ring_colour, draw_outline, ring_outline);
 }
 
 // The classic pointer arrow from the reference design's `pointer-glyph`, drawn
@@ -983,33 +990,17 @@ void RenderPanel()
                 }
 
                 // Icon (upper region) + label (lower region), both centered in the
-                // tile. The icon is the REAL embedded preset artwork — the same
-                // colour-layer texture DrawMarker uses — tinted by the preset's own
-                // signature hue so each tile shows in its signature colour (Ring
-                // magenta, Reticle cyan, Cross white, Dash violet, Halo teal). If
-                // the texture's Resource isn't uploaded yet, the icon area is left
-                // blank (no hand-drawn fallback). A preset drawn in code (Pulse Ring,
-                // Corner Reticle, Beacon Crosshair) is drawn by the same routine as
-                // its marker, at icon size, colour layer only — as the tile shows
-                // only the colour layer.
+                // tile. The icon is the preset drawn by the same routine as its
+                // marker, at icon size, colour layer only, tinted by the preset's
+                // own signature hue so each tile shows in its signature colour (Ring
+                // magenta, Reticle cyan, Cross white, Dash violet, Halo teal).
                 const float cx = tile_pos.x + tile_w * 0.5f;
                 const float icon_half = tile_w * 0.26f; // 0.52 wide, centered
                 const float icon_cy   = tile_pos.y + tile_w * 0.40f;
-                const ImVec2 icon_min(cx - icon_half, icon_cy - icon_half);
-                const ImVec2 icon_max(cx + icon_half, icon_cy + icon_half);
                 const cursor_finder::Rgb hue = cursor_finder::signature_hue(kPresets[i].p);
                 const ImU32 tint = IM_COL32(hue.r, hue.g, hue.b, 255);
-                if (!PresetUsesImages(i))
-                {
-                    DrawCodePreset(sdl, kPresets[i].p, ImVec2(cx, icon_cy), icon_half * 2.0f,
-                                   tint, /*draw_outline=*/false, 0);
-                }
-                else if (Texture_t* t = ResolveTex(i, /*colour_layer=*/true);
-                         t && t->Resource)
-                {
-                    sdl->AddImage(static_cast<ImTextureID>(t->Resource),
-                                  icon_min, icon_max, ImVec2(0, 0), ImVec2(1, 1), tint);
-                }
+                DrawCodePreset(sdl, kPresets[i].p, ImVec2(cx, icon_cy), icon_half * 2.0f,
+                               tint, /*draw_outline=*/false, 0);
 
                 const ImU32 lbl_col = active
                     ? shared::theme::to_u32(pal.text_gold)
@@ -1448,31 +1439,6 @@ bool CursorIsHidden()
     return (ci.flags & CURSOR_SHOWING) == 0;
 }
 
-// One-shot texture-readiness diagnostic: after a few seconds, report how many
-// preset layers actually have a live Resource, out of the presets still drawn
-// from images (presets drawn in code have no texture to wait for). If this logs
-// 0 ready, the load path itself is the problem (not our draw code).
-void MaybeLogTexReadiness()
-{
-    static int  frames = 0;
-    static bool logged = false;
-    if (logged || !g_API || !g_API->Log) { return; }
-    if (++frames < 180) { return; } // ~3s at 60fps
-    int colour_ready = 0, outline_ready = 0, image_presets = 0;
-    for (int i = 0; i < 5; ++i)
-    {
-        if (!PresetUsesImages(i)) { continue; }
-        ++image_presets;
-        if (g_Tex[i].colour  && g_Tex[i].colour->Resource)  { ++colour_ready; }
-        if (g_Tex[i].outline && g_Tex[i].outline->Resource) { ++outline_ready; }
-    }
-    char msg[160];
-    std::snprintf(msg, sizeof(msg),
-        "cursor-finder: preset textures ready colour=%d/%d outline=%d/%d",
-        colour_ready, image_presets, outline_ready, image_presets);
-    g_API->Log(LOGL_INFO, "Cursor Finder", msg);
-    logged = true;
-}
 
 // Apply or release the Win32 pointer clip to match the freeze state. On the
 // transition into frozen we capture the current screen position — the press
@@ -1535,7 +1501,6 @@ UINT OnWndProc(HWND /*hWnd*/, UINT uMsg, WPARAM wParam, LPARAM /*lParam*/)
 // Registered as an RT_Render callback; Nexus calls it every frame.
 void AddonRender()
 {
-    MaybeLogTexReadiness();
     // Register / hide the branded toolbar icon per its setting, before the
     // panel-open gate so the button shows with the panel closed.
     EnsureQuickAccessIcon();
@@ -1842,17 +1807,10 @@ void AddonLoad(AddonAPI_t* aApi)
 
     if (aApi->Log)
     {
-        // Count the layers that still come from images (empty slots are drawn in code).
-        unsigned image_layers = 0;
-        for (const PresetTex& pt : kPresetTex)
-        {
-            if (pt.outline.data) { ++image_layers; }
-            if (pt.colour.data)  { ++image_layers; }
-        }
         char msg[160];
         std::snprintf(msg, sizeof(msg),
-            "cursor-finder: Textures_GetOrCreateFromMemory=%p (loading %u preset layers from memory)",
-            reinterpret_cast<void*>(aApi->Textures_GetOrCreateFromMemory), image_layers);
+            "cursor-finder: Textures_GetOrCreateFromMemory=%p",
+            reinterpret_cast<void*>(aApi->Textures_GetOrCreateFromMemory));
         aApi->Log(LOGL_INFO, "Cursor Finder", msg);
     }
 
@@ -1863,8 +1821,8 @@ void AddonLoad(AddonAPI_t* aApi)
     aApi->GUI_Register(RT_OptionsRender, AddonOptions);
 
     // Warm the window-background texture once at Load so the parchment card fill
-    // is ready by first render. Same lazy memory loader as the preset
-    // layers; if it is not ready yet the first frame draws the primitive frame.
+    // is ready by first render. Same lazy memory loader as the icons;
+    // if it is not ready yet the first frame draws the primitive frame.
     ResolveWindowTex();
     ResolveIconTex();     // warm the branded title-chip icon
     ResolvePointerTex();  // warm the branded preview arrow

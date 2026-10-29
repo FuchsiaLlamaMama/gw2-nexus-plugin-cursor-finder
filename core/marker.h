@@ -1,5 +1,5 @@
 // cursor-finder-core — pointer-marker geometry. Pure C++17, no ImGui: the DLL feeds the
-// returned floats straight into ImGui draw calls (AddImage / AddCircle / filled
+// returned floats straight into ImGui draw calls (AddCircle / polylines / filled
 // polygons), but the math stays testable off-game.
 #pragma once
 
@@ -128,5 +128,104 @@ struct BeaconCrosshairGeometry {
 // scaled by size / 200, plus the fixed outline band. A non-positive size yields
 // all zeros (nothing to draw).
 BeaconCrosshairGeometry beacon_crosshair_geometry(float center_x, float center_y, float size);
+
+// The Radar Dash's dashes. The design's dash pattern (26 on, 22 off) does not fit
+// its circle a whole number of times, so the ring is drawn with 9 equal periods in
+// the same 26 : 22 ratio.
+constexpr int kRadarDashCount = 9;
+
+// A dash's body, between its round caps, as angles in radians about the ring
+// centre: 0 is 3 o'clock and a growing angle turns clockwise on screen (y down),
+// the way an SVG circle's stroke runs. start < end.
+struct DashArc {
+    float start = 0.0f;
+    float end   = 0.0f;
+};
+
+// The Radar Dash drawn in code: 9 round-capped arcs on one circle and a centre
+// dot; the outline is a 2 px arc along each dash's outer and inner edge (spanning
+// only the body, never round the caps, never under the colour) and a dot 2 px
+// larger, drawn under the colour. Pixels, screen space.
+struct RadarDashGeometry {
+    MarkerPoint center;
+    DashArc dashes[kRadarDashCount]; // the first starts at 3 o'clock
+    float radius               = 0.0f; // the dashes' centre line
+    float stroke               = 0.0f; // colour stroke, full width
+    float dot_radius           = 0.0f;
+    float outline_stroke       = 0.0f; // each outline arc's full width: kMarkerOutlineBandPx
+    float outline_outer_radius = 0.0f; // centre of the arc along the outer edge
+    float outline_inner_radius = 0.0f; // centre of the arc along the inner edge
+    float outline_dot_radius   = 0.0f; // dot_radius + kMarkerOutlineBandPx
+};
+
+// The Radar Dash at marker size `size` centred on (center_x, center_y): the
+// design's ring (200-unit box; circle r 72, stroke 11, round caps, dot r 6;
+// assets/svg/radar-dash-colour.svg) scaled by size / 200, its dashes spread evenly
+// as above, plus the fixed outline band. A non-positive size yields all zeros
+// (nothing to draw).
+RadarDashGeometry radar_dash_geometry(float center_x, float center_y, float size);
+
+// Segments along one dash body, and round one cap (a half circle).
+constexpr int kDashArcSteps = 16;
+constexpr int kDashCapSteps = 12;
+
+// Most points on one arc from dash_arc_points.
+constexpr int kDashArcMaxPoints = kDashArcSteps + 1;
+
+// Points along a circle of `radius` about `center` from arc.start to arc.end, both
+// ends included: an outline arc's centre line, stroked open (flat ends). Fixed
+// capacity, no heap. Empty (count 0) for a non-positive radius.
+struct DashArcPoints {
+    MarkerPoint points[kDashArcMaxPoints];
+    int count = 0;
+};
+DashArcPoints dash_arc_points(const MarkerPoint& center, float radius, const DashArc& arc);
+
+// Most points in one dash's stroke boundary: both long sides of the body and the
+// inside of both caps.
+constexpr int kDashBoundaryMaxPoints = 2 * (kDashArcSteps + 1) + 2 * (kDashCapSteps - 1);
+
+// One dash's stroke boundary: the first `count` of `points`, and the point it is
+// filled from. Fixed capacity, so the DLL builds it every frame without the heap.
+struct DashBoundary {
+    MarkerPoint fan_center;
+    MarkerPoint points[kDashBoundaryMaxPoints];
+    int count = 0;
+};
+
+// The outer boundary of the arc `arc` on the circle of `radius` about `center`,
+// stroked at full width `stroke` with round caps: the closed polygon the DLL fills,
+// wound clockwise on screen (y down). It runs along the outer side of the body,
+// round the end cap, back along the inner side and round the start cap; each cap
+// begins and ends exactly on a corner of the body. The shape is not convex but is
+// star-shaped from the middle of its centre line (fan_center), so it fills as one
+// triangle fan from there: one mesh, no seam where a cap meets the body, nothing
+// painted twice. That holds while the inner side stays in view of the fan point,
+// as it does for the Radar Dash at any size. Empty (count 0) for a non-positive
+// radius or stroke.
+DashBoundary dash_stroke_boundary(const MarkerPoint& center, float radius, float stroke,
+                                  const DashArc& arc);
+
+// The Soft Halo's alpha stops, from the centre out.
+constexpr int kSoftHaloStops = 3;
+
+// One stop of the halo's radial alpha: `at` is the fraction of the radius.
+struct SoftHaloStop {
+    float at    = 0.0f;
+    float alpha = 0.0f;
+};
+
+// The Soft Halo drawn in code: a disc whose alpha falls off from the centre to
+// nothing at its edge, linearly between the stops. No outline. Pixels.
+struct SoftHaloGeometry {
+    float radius = 0.0f;
+    SoftHaloStop stops[kSoftHaloStops];
+};
+
+// The Soft Halo at marker size `size`: the design's glow (200-unit box; disc r 96,
+// alpha 0.92 at the centre, 0.5 at 52 % of the radius, 0 at the edge;
+// assets/svg/soft-halo-colour.svg) scaled by size / 200. A non-positive size
+// yields a zero radius (nothing to draw).
+SoftHaloGeometry soft_halo_geometry(float size);
 
 } // namespace cursor_finder

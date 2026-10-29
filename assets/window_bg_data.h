@@ -1,7 +1,7 @@
 // window_bg_data.h — window-bg-portrait.png (702x1009) as a C byte array.
 // Generated from assets/textures/window-bg-portrait.png. Loaded via
 // Textures_GetOrCreateFromMemory, same as
-// the preset layers (no RCDATA/FindResource).
+// the icons (no RCDATA/FindResource).
 #pragma once
 #include <cstddef>
 
