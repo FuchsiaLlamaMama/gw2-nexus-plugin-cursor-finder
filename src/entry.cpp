@@ -515,14 +515,18 @@ void DrawBeaconCrosshair(ImDrawList* dl, const ImVec2& center, float size,
 }
 
 // The Radar Dash, drawn in code at marker size `size` (geometry from
-// cursor_finder::radar_dash_geometry): the outline layer first (when
-// `draw_outline`) — for each dash, two 2 px arcs with flat ends along its outer
-// and inner edge, spanning only the dash's body, so they never run round the round
-// ends or lie under the colour (which would show through below full opacity) and
-// the gaps between dashes stay open; then the outline dot. Then the colour layer:
-// each dash a round-capped arc filled as one mesh (cursor_finder::
-// dash_stroke_boundary: no seam where a cap meets the body, nothing painted
-// twice), and the dot. Used for the marker and its style tile (colour only).
+// cursor_finder::radar_dash_geometry). With the outline off: each dash a
+// round-capped arc filled as one mesh (cursor_finder::dash_stroke_boundary: no
+// seam where a cap meets the body, nothing painted twice), and the dot. With it
+// on, the dashes get flat ends instead: round tips beside dark-edged sides look
+// wrong in game. Each flat dash keeps the visible length of the round one
+// (cursor_finder::flat_dash_arc). The outline layer comes first: for each dash,
+// two 2 px arcs with flat ends along its outer and inner edge, spanning exactly
+// the flat dash, so they never cross its ends or lie under the colour (which
+// would show through below full opacity) and the gaps between dashes stay open;
+// then the outline dot. Then each flat dash filled as one mesh
+// (cursor_finder::flat_dash_boundary), and the dot. Used for the marker and its
+// style tile (colour only).
 void DrawRadarDash(ImDrawList* dl, const ImVec2& center, float size,
                    ImU32 colour, bool draw_outline, ImU32 outline_colour)
 {
@@ -535,10 +539,12 @@ void DrawRadarDash(ImDrawList* dl, const ImVec2& center, float size,
         const float radii[2] = {g.outline_outer_radius, g.outline_inner_radius};
         for (const cursor_finder::DashArc& dash : g.dashes)
         {
+            const cursor_finder::DashArc span =
+                cursor_finder::flat_dash_arc(dash, g.radius, g.stroke);
             for (const float radius : radii)
             {
                 const cursor_finder::DashArcPoints arc =
-                    cursor_finder::dash_arc_points(g.center, radius, dash);
+                    cursor_finder::dash_arc_points(g.center, radius, span);
                 ImVec2 pts[cursor_finder::kDashArcMaxPoints];
                 for (int k = 0; k < arc.count; ++k)
                 {
@@ -553,8 +559,11 @@ void DrawRadarDash(ImDrawList* dl, const ImVec2& center, float size,
     }
     for (const cursor_finder::DashArc& dash : g.dashes)
     {
-        const cursor_finder::DashBoundary boundary =
-            cursor_finder::dash_stroke_boundary(g.center, g.radius, g.stroke, dash);
+        const cursor_finder::DashBoundary boundary = draw_outline
+            ? cursor_finder::flat_dash_boundary(
+                  g.center, g.radius, g.stroke,
+                  cursor_finder::flat_dash_arc(dash, g.radius, g.stroke))
+            : cursor_finder::dash_stroke_boundary(g.center, g.radius, g.stroke, dash);
         AddStarPolyFilled(dl, ImVec2(boundary.fan_center.x, boundary.fan_center.y),
                           boundary.points, boundary.count, colour);
     }

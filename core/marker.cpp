@@ -328,6 +328,53 @@ DashBoundary dash_stroke_boundary(const MarkerPoint& center, float radius, float
     return out;
 }
 
+DashArc flat_dash_arc(const DashArc& dash, float radius, float stroke)
+{
+    if (radius <= 0.0f || stroke <= 0.0f) { return dash; }
+    const float cap = 0.5f * stroke / radius;
+    return DashArc{dash.start - cap, dash.end + cap};
+}
+
+// Both sides of a flat-ended dash fit in the round-capped dash's boundary.
+static_assert(2 * (kDashArcSteps + 1) <= kDashBoundaryMaxPoints,
+              "a flat-ended dash boundary must fit DashBoundary");
+
+DashBoundary flat_dash_boundary(const MarkerPoint& center, float radius, float stroke,
+                                const DashArc& arc)
+{
+    DashBoundary out;
+    if (radius <= 0.0f || stroke <= 0.0f) { return out; }
+    const float h = stroke * 0.5f;
+    // The fill's soft edge moves a square corner half a pixel along each side, so a
+    // piece shorter than that would fold back there and paint a spot twice. Cut each
+    // side into pieces whose chord on the shorter, inner side is at least a pixel
+    // (twice the fold point, on purpose, for headroom).
+    constexpr float kMinPiecePx = 1.0f;
+    const float inner = radius - h;
+    const float piece = inner > 0.5f * kMinPiecePx
+        ? 2.0f * std::asin(0.5f * kMinPiecePx / inner)
+        : arc.end - arc.start;
+    const int steps = piece > 0.0f
+        ? std::clamp(static_cast<int>((arc.end - arc.start) / piece), 1, kDashArcSteps)
+        : 1;
+    out.fan_center = on_circle(center, radius, 0.5f * (arc.start + arc.end));
+    // 1. The outer side, start to end, both corners included. The straight edge
+    //    from its last point to the next is the flat end.
+    for (int k = 0; k <= steps; ++k)
+    {
+        out.points[out.count++] =
+            on_circle(center, radius + h, step_angle(arc.start, arc.end, k, steps));
+    }
+    // 2. The inner side, end back to start, both corners included; the closing edge
+    //    back to the first point is the flat start.
+    for (int k = 0; k <= steps; ++k)
+    {
+        out.points[out.count++] =
+            on_circle(center, radius - h, step_angle(arc.end, arc.start, k, steps));
+    }
+    return out;
+}
+
 SoftHaloGeometry soft_halo_geometry(float size)
 {
     if (size <= 0.0f) { return SoftHaloGeometry{}; }

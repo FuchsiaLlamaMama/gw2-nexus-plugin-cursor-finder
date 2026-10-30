@@ -142,10 +142,11 @@ struct DashArc {
     float end   = 0.0f;
 };
 
-// The Radar Dash drawn in code: 9 round-capped arcs on one circle and a centre
-// dot; the outline is a 2 px arc along each dash's outer and inner edge (spanning
-// only the body, never round the caps, never under the colour) and a dot 2 px
-// larger, drawn under the colour. Pixels, screen space.
+// The Radar Dash drawn in code: 9 arcs on one circle and a centre dot. With the
+// outline off the arcs have round caps. With it on they have flat ends at the same
+// visible length (flat_dash_arc), and the outline is a 2 px arc along each dash's
+// outer and inner edge spanning exactly that (never across the ends, never under
+// the colour) and a dot 2 px larger, drawn under the colour. Pixels, screen space.
 struct RadarDashGeometry {
     MarkerPoint center;
     DashArc dashes[kRadarDashCount]; // the first starts at 3 o'clock
@@ -205,6 +206,28 @@ struct DashBoundary {
 // radius or stroke.
 DashBoundary dash_stroke_boundary(const MarkerPoint& center, float radius, float stroke,
                                   const DashArc& arc);
+
+// The span a dash covers when drawn with flat ends (with the outline on): its body
+// widened at both ends by the round cap's radius as an angle, stroke / 2 / radius,
+// so each flat end sits where the round end reached and the dash keeps its visible
+// length. The outline arcs span exactly this too. The dash unchanged for a
+// non-positive radius or stroke.
+DashArc flat_dash_arc(const DashArc& dash, float radius, float stroke);
+
+// The outer boundary of the arc `arc` on the circle of `radius` about `center`,
+// stroked at full width `stroke` with flat ends: the closed polygon the DLL fills,
+// wound clockwise on screen (y down). It runs along the outer side, straight in
+// along the end, back along the inner side and straight out along the start. Not
+// convex, but star-shaped from the middle of its centre line (fan_center), so it
+// fills as one triangle fan from there, nothing painted twice. That holds while
+// the inner side stays in view of the fan point, half the arc less than
+// acos((radius - stroke / 2) / radius): for the Radar Dash's flat dashes about
+// 15.2 degrees against 22.5, at any size. Each side is cut into up to
+// kDashArcSteps pieces, none shorter than a pixel, so the fill's soft edge does
+// not fold back at the square corners of a small dash. Empty (count 0) for a
+// non-positive radius or stroke.
+DashBoundary flat_dash_boundary(const MarkerPoint& center, float radius, float stroke,
+                                const DashArc& arc);
 
 // The Soft Halo's alpha stops, from the centre out.
 constexpr int kSoftHaloStops = 3;
