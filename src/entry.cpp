@@ -889,13 +889,16 @@ void RenderPanel()
     // A 3-part slider row (design size-row/opacity-row): a muted label in a
     // left column (96 au unless the caller passes a wider `label_w`), the slider
     // filling the middle, and the value (gold) right-aligned in a fixed trailing
-    // column (44 au); `zero_text`, when given, is shown instead of the value at 0. BEHAVIOUR is
-    // identical to a plain SliderInt — the caller still clamps and writes the
-    // same field; this only relays the affordance. Returns true on change.
+    // column (44 au). The value shown is `*value * display_scale` (a slider that
+    // moves in steps runs over the step index and shows index x step), or
+    // `zero_text`, when given, at 0. The slider itself is a plain SliderInt over
+    // [vmin, vmax]: the caller still clamps (and, for a stepped slider, multiplies
+    // back by the step) before writing its field. Returns true on change.
     auto SliderRow = [&pal](const char* label, const char* id, int* value,
                             int vmin, int vmax, const char* value_fmt,
                             float label_w = 96.0f, // design label-col
-                            const char* zero_text = nullptr) -> bool {
+                            const char* zero_text = nullptr,
+                            int display_scale = 1) -> bool {
         const float value_w  = 44.0f; // design value-col
         const float gap      = 12.0f; // design gap-col
         const float row_w    = ImGui::GetContentRegionAvail().x;
@@ -931,7 +934,7 @@ void RenderPanel()
         }
         else
         {
-            std::snprintf(buf, sizeof(buf), value_fmt, *value);
+            std::snprintf(buf, sizeof(buf), value_fmt, *value * display_scale);
         }
         const float tw = ImGui::CalcTextSize(buf).x;
         ImGui::SameLine(x0 + label_w + slider_w + gap * 2.0f + (value_w - tw));
@@ -1196,11 +1199,15 @@ void RenderPanel()
                 s.dash_count = cursor_finder::clamp_int(dashes, cursor_finder::kDashCountMin,
                                                         cursor_finder::kDashCountMax);
             }
-            int width = s.dash_width_pct;
-            if (SliderRow("Dash width", "##dash-width", &width, cursor_finder::kDashWidthMin,
-                          cursor_finder::kDashWidthMax, "%d%%", marker_label_w, "Dots"))
+            // The slider runs over the 5 % steps (0-20), so its grab, its value and
+            // the drawn dash always agree, and keyboard or gamepad moves a step.
+            constexpr int kStep = cursor_finder::kDashWidthStep;
+            int step = cursor_finder::snap_dash_width(s.dash_width_pct) / kStep;
+            if (SliderRow("Dash width", "##dash-width", &step, cursor_finder::kDashWidthMin / kStep,
+                          cursor_finder::kDashWidthMax / kStep, "%d%%", marker_label_w, "Dots",
+                          kStep))
             {
-                s.dash_width_pct = cursor_finder::snap_dash_width(width);
+                s.dash_width_pct = cursor_finder::snap_dash_width(step * kStep);
             }
         }
 

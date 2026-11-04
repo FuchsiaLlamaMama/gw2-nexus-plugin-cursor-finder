@@ -86,8 +86,8 @@ inline constexpr int clamp_int(int v, int lo, int hi)
 }
 
 // A dash width clamped to [kDashWidthMin, kDashWidthMax] and rounded to the nearest
-// kDashWidthStep (a half step rounds up). ImGui's SliderInt has no step, so the
-// panel and the loader both snap through this.
+// kDashWidthStep (82 -> 80, 83 -> 85). The loader snaps a saved value through this;
+// the panel's slider moves in whole steps.
 inline constexpr int snap_dash_width(int v)
 {
     const int c = clamp_int(v, kDashWidthMin, kDashWidthMax);

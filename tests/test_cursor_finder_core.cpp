@@ -1114,6 +1114,9 @@ TEST_CASE("the radar-dash geometry is the design's ring at size 200")
 TEST_CASE("the radar dash has N equal dashes, one centred at 12 o'clock, by the design's formula")
 {
     REQUIRE(cursor_finder::kRadarDashMaxCount == 16);
+    // The geometry's range is the settings' range.
+    CHECK(cursor_finder::kRadarDashMinCount == cursor_finder::kDashCountMin);
+    CHECK(cursor_finder::kRadarDashMaxCount == cursor_finder::kDashCountMax);
     for (int n = 4; n <= 16; ++n)
     {
         for (int w = 0; w <= 100; w += 5)
@@ -1313,6 +1316,19 @@ TEST_CASE("every radar dash is round-capped and fills as one triangulated mesh, 
                             const double a2 = area(tri, 3);
                             CHECK(a2 > 0.0);
                             sum += a2;
+                            // No triangle lies along one side of the body: its three
+                            // points are never all on the outer edge circle, nor all
+                            // on the inner one.
+                            const float h = 0.5f * stroke, eps = 1e-3f * g.radius;
+                            int on_outer = 0, on_inner = 0;
+                            for (const MarkerPoint& p : tri)
+                            {
+                                const float r = distance(p, g.center);
+                                if (std::fabs(r - (g.radius + h)) < eps) { ++on_outer; }
+                                if (std::fabs(r - (g.radius - h)) < eps) { ++on_inner; }
+                            }
+                            CHECK(on_outer < 3);
+                            CHECK(on_inner < 3);
                         }
                         CHECK(sum == doctest::Approx(area(b.points, b.count)).epsilon(1e-4));
                     }
