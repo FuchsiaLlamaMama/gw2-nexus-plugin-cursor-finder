@@ -243,27 +243,42 @@ BeaconCrosshairGeometry beacon_crosshair_geometry(float center_x, float center_y
     return g;
 }
 
-RadarDashGeometry radar_dash_geometry(float center_x, float center_y, float size)
+RadarDashGeometry radar_dash_geometry(float center_x, float center_y, float size,
+                                      int dash_count, int dash_width_pct)
 {
     if (size <= 0.0f) { return RadarDashGeometry{}; }
-    // Design values in its 200-unit box: circle r 72, stroke 11, dash 26 on and 22
-    // off, dot r 6; the outline layer strokes the same circle at 17 with a dot r 9.
+    // Design values in its 200-unit box: circle r 72, stroke 11, dot r 6; the
+    // outline layer strokes the same circle at 17 with a dot r 9.
     constexpr float kDesignRadius           = 72.0f;
     constexpr float kDesignStroke           = 11.0f;
     constexpr float kDesignDotRadius        = 6.0f;
     constexpr float kDesignOutlineStroke    = 17.0f;
     constexpr float kDesignOutlineDotRadius = 9.0f;
-    constexpr float kDashOn                 = 26.0f;
-    constexpr float kDashOff                = 22.0f;
+    // The design's width scale ends at 0.75 (the dashes never join); its formula
+    // divides by 0.9.
+    constexpr float kDesignWidthMax         = 0.75f;
+    constexpr float kDesignWidthDivisor     = 0.9f;
+    const int n = std::clamp(dash_count, kRadarDashMinCount, kRadarDashMaxCount);
+    const float t = static_cast<float>(std::clamp(dash_width_pct, 0, 100)) / 100.0f *
+                    kDesignWidthMax;
     const float scale  = size / kDesignBox;
-    const float period = 4.0f * kHalfPi / static_cast<float>(kRadarDashCount);
-    const float dash   = period * kDashOn / (kDashOn + kDashOff);
+    const float period = 4.0f * kHalfPi / static_cast<float>(n); // as an angle
+    // The centre line, cap centre to cap centre, in design units, then as half an
+    // angle about the ring centre.
+    const float period_len = period * kDesignRadius;
+    const float body = (period_len - std::min(kDesignStroke, period_len)) * t /
+                       kDesignWidthDivisor;
+    const float half = 0.5f * body / kDesignRadius;
     RadarDashGeometry g;
     g.center = MarkerPoint{center_x, center_y};
-    for (int i = 0; i < kRadarDashCount; ++i)
+    g.dash_count = n;
+    for (int i = 0; i < n; ++i)
     {
-        g.dashes[i].start = period * static_cast<float>(i);
-        g.dashes[i].end   = g.dashes[i].start + dash;
+        // Dash 0 is centred at 12 o'clock (angle -pi/2, y down); the rest follow
+        // clockwise.
+        const float mid = -kHalfPi + period * static_cast<float>(i);
+        g.dashes[i].start = mid - half;
+        g.dashes[i].end   = mid + half;
     }
     g.radius             = kDesignRadius * scale;
     g.stroke             = kDesignStroke * scale;
@@ -287,6 +302,29 @@ DashBoundary dash_stroke_boundary(const MarkerPoint& center, float radius, float
     auto push = [&](const MarkerPoint& p) {
         if (out.count < kDashBoundaryMaxPoints) { out.points[out.count++] = p; }
     };
+    auto triangle = [&](int a, int b, int c) {
+        if (out.triangle_count < kDashBoundaryMaxTriangles)
+        {
+            int* t = out.triangles[out.triangle_count++];
+            t[0] = a; t[1] = b; t[2] = c;
+        }
+    };
+
+    // No body (width 0): one round dot, a circle about the point from its outer
+    // side, filled as a fan from its first point.
+    if (arc.end <= arc.start)
+    {
+        constexpr int kDotPoints = 2 * kDashCapSteps;
+        for (int k = 0; k < kDotPoints; ++k)
+        {
+            push(on_circle(out.fan_center, h,
+                           arc.start + 2.0f * pi * static_cast<float>(k) /
+                                           static_cast<float>(kDotPoints)));
+        }
+        for (int k = 1; k + 1 < kDotPoints; ++k) { triangle(0, k, k + 1); }
+        return out;
+    }
+
     // Walking by growing angle (about the ring centre on the outer side, about each
     // cap's centre round a cap) winds the polygon clockwise on screen.
     // 1. The outer side of the body, start to end, both corners included.
@@ -314,6 +352,26 @@ DashBoundary dash_stroke_boundary(const MarkerPoint& center, float radius, float
         push(on_circle(start, h,
                        step_angle(arc.start + pi, arc.start + 2.0f * pi, k, kDashCapSteps)));
     }
+
+    // The inside, over those points. Index of the outer side's point k steps from
+    // the start, of the inner side's (which runs back from the end), and of each
+    // cap's points between its corners (1 to kDashCapSteps - 1).
+    constexpr int A = kDashArcSteps, C = kDashCapSteps;
+    auto outer     = [&](int k) { return k; };
+    auto end_cap   = [&](int j) { return A + j; };
+    auto inner     = [&](int k) { return 2 * A + C - k; };
+    auto start_cap = [&](int j) { return 2 * A + C + j; };
+    // The body: a strip of quads, each cut in two, between the sides.
+    for (int k = 0; k < A; ++k)
+    {
+        triangle(outer(k), outer(k + 1), inner(k + 1));
+        triangle(outer(k), inner(k + 1), inner(k));
+    }
+    // Each cap, a half disc, as a fan from the corner it starts at.
+    for (int j = 1; j < C - 1; ++j) { triangle(outer(A), end_cap(j), end_cap(j + 1)); }
+    triangle(outer(A), end_cap(C - 1), inner(A));
+    for (int j = 1; j < C - 1; ++j) { triangle(inner(0), start_cap(j), start_cap(j + 1)); }
+    triangle(inner(0), start_cap(C - 1), outer(0));
     return out;
 }
 

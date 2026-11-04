@@ -24,6 +24,8 @@
 //         persisted. An older/absent-version file migrates forward as
 //         ALREADY welcomed (welcomed = true) so upgrading users get no
 //         surprise auto-open.
+//   v8: + dash_count / dash_width_pct (Radar Dash's number of dashes and dash
+//         width; absent in an older file -> the defaults, 9 and 85)
 // See cursor_finder_store.h for the load/save/migrate machinery.
 #pragma once
 
@@ -72,9 +74,24 @@ inline constexpr int kFillOpacityMax = 100;  // %
 inline constexpr int kFillSizeMin    = 10;   // % of the preset's max fill extent
 inline constexpr int kFillSizeMax    = 100;  // % (100 = as big as the shape)
 
+inline constexpr int kDashCountMin  = 4;   // Radar Dash's number of dashes
+inline constexpr int kDashCountMax  = 16;
+inline constexpr int kDashWidthMin  = 0;   // % : round dots
+inline constexpr int kDashWidthMax  = 100; // % : the longest dashes, a small gap left
+inline constexpr int kDashWidthStep = 5;   // %
+
 inline constexpr int clamp_int(int v, int lo, int hi)
 {
     return v < lo ? lo : (v > hi ? hi : v);
+}
+
+// A dash width clamped to [kDashWidthMin, kDashWidthMax] and rounded to the nearest
+// kDashWidthStep (a half step rounds up). ImGui's SliderInt has no step, so the
+// panel and the loader both snap through this.
+inline constexpr int snap_dash_width(int v)
+{
+    const int c = clamp_int(v, kDashWidthMin, kDashWidthMax);
+    return (c + kDashWidthStep / 2) / kDashWidthStep * kDashWidthStep;
 }
 
 // The signature hue each preset carries by default. Values from the reference
@@ -171,7 +188,7 @@ inline std::optional<InCombatMode> in_combat_from_slug(std::string_view s)
 struct CursorSettings {
     // Bump when the on-disk shape changes; older/absent-version files migrate
     // forward (see cursor_finder_store.cpp).
-    static constexpr int kSchemaVersion = 7;
+    static constexpr int kSchemaVersion = 8;
 
     // --- v1 ------------------------------------------------------------------
     // Master on/off for the marker. Default ON: enabling the addon at all is an
@@ -250,6 +267,14 @@ struct CursorSettings {
     // (cursor_finder_store.cpp), so upgrading users get no surprise auto-open.
     bool welcomed = false;
 
+    // --- v8 Radar Dash ------------------------------------------------------
+    // Radar Dash's number of dashes ([kDashCountMin, kDashCountMax]) and dash
+    // width (% on kDashWidthStep steps: 0 = round dots, 100 = the longest dashes,
+    // which still leave a gap). The defaults are close to the v1.1 dash. Kept when
+    // another preset is selected.
+    int dash_count     = 9;
+    int dash_width_pct = 85;
+
     // The factory default record (first run, or recovery from a corrupt file).
     static CursorSettings defaults() { return CursorSettings{}; }
 };
@@ -278,7 +303,9 @@ inline bool operator==(const CursorSettings& a, const CursorSettings& b)
            a.show_quick_access_icon == b.show_quick_access_icon &&
            a.out_of_combat_mode == b.out_of_combat_mode &&
            a.in_combat_mode == b.in_combat_mode &&
-           a.welcomed == b.welcomed;
+           a.welcomed == b.welcomed &&
+           a.dash_count == b.dash_count &&
+           a.dash_width_pct == b.dash_width_pct;
 }
 inline bool operator!=(const CursorSettings& a, const CursorSettings& b)
 {

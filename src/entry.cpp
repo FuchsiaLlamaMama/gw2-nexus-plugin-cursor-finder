@@ -27,6 +27,7 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <initializer_list>
 
 #include "imgui.h"
 #include "Nexus.h"
@@ -372,6 +373,29 @@ void DrawPulseRing(ImDrawList* dl, const ImVec2& center, float size,
     dl->AddCircle(center, r, colour, kSegments, g.colour_stroke);
 }
 
+// The anti-aliased fringe's offset at boundary point i of a polygon wound clockwise
+// on screen: half the fringe width `aa` along the averaged normals of the two edges
+// meeting there, as ImGui v1.80's AddConvexPolyFilled does (IM_FIXNORMAL2F). The
+// solid (inner) vertex sits at p - offset, the transparent (outer) one at p + offset.
+ImVec2 FringeOffset(const cursor_finder::MarkerPoint* points, int count, int i, float aa)
+{
+    // The outward unit normal of edge k -> k + 1 (clockwise winding: (dy, -dx)).
+    auto edge_normal = [&](int k) {
+        const cursor_finder::MarkerPoint& p0 = points[k];
+        const cursor_finder::MarkerPoint& p1 = points[(k + 1) % count];
+        float dx = p1.x - p0.x, dy = p1.y - p0.y;
+        const float d2 = dx * dx + dy * dy;
+        if (d2 > 0.0f) { const float inv = 1.0f / std::sqrt(d2); dx *= inv; dy *= inv; }
+        return ImVec2(dy, -dx);
+    };
+    const ImVec2 n0 = edge_normal((i + count - 1) % count);
+    const ImVec2 n1 = edge_normal(i);
+    float dm_x = (n0.x + n1.x) * 0.5f, dm_y = (n0.y + n1.y) * 0.5f;
+    float d2 = dm_x * dm_x + dm_y * dm_y;
+    if (d2 < 0.5f) { d2 = 0.5f; }
+    return ImVec2(dm_x * aa * 0.5f / d2, dm_y * aa * 0.5f / d2);
+}
+
 // Fill a polygon (`count` points) that is star-shaped from `center` (every boundary
 // point is in plain view of it), wound clockwise on screen. A stroked bracket is concave, so
 // AddConvexPolyFilled (a fan from its first point) cannot fill it; this mirrors
@@ -401,16 +425,6 @@ void AddStarPolyFilled(ImDrawList* dl, const ImVec2& center,
         return;
     }
 
-    // The outward unit normal of edge i -> i + 1 (clockwise winding: (dy, -dx)).
-    auto edge_normal = [&](int i) {
-        const ImVec2 p0 = at(i);
-        const ImVec2 p1 = at((i + 1) % count);
-        float dx = p1.x - p0.x, dy = p1.y - p0.y;
-        const float d2 = dx * dx + dy * dy;
-        if (d2 > 0.0f) { const float inv = 1.0f / std::sqrt(d2); dx *= inv; dy *= inv; }
-        return ImVec2(dy, -dx);
-    };
-
     const float aa = dl->_FringeScale;
     const ImU32 col_trans = col & ~IM_COL32_A_MASK;
     dl->PrimReserve(count * 3 + count * 6, 1 + count * 2);
@@ -421,17 +435,10 @@ void AddStarPolyFilled(ImDrawList* dl, const ImVec2& center,
     dl->PrimWriteVtx(center, uv, col);
     for (int i = 0; i < count; ++i)
     {
-        // Average the two edge normals, as AddConvexPolyFilled does (IM_FIXNORMAL2F).
-        const ImVec2 n0 = edge_normal((i + count - 1) % count);
-        const ImVec2 n1 = edge_normal(i);
-        float dm_x = (n0.x + n1.x) * 0.5f, dm_y = (n0.y + n1.y) * 0.5f;
-        float d2 = dm_x * dm_x + dm_y * dm_y;
-        if (d2 < 0.5f) { d2 = 0.5f; }
-        dm_x *= aa * 0.5f / d2;
-        dm_y *= aa * 0.5f / d2;
+        const ImVec2 dm = FringeOffset(points, count, i, aa);
         const ImVec2 p = at(i);
-        dl->PrimWriteVtx(ImVec2(p.x - dm_x, p.y - dm_y), uv, col);       // inner
-        dl->PrimWriteVtx(ImVec2(p.x + dm_x, p.y + dm_y), uv, col_trans); // outer
+        dl->PrimWriteVtx(ImVec2(p.x - dm.x, p.y - dm.y), uv, col);       // inner
+        dl->PrimWriteVtx(ImVec2(p.x + dm.x, p.y + dm.y), uv, col_trans); // outer
     }
     for (int i0 = count - 1, i1 = 0; i1 < count; i0 = i1++)
     {
@@ -444,6 +451,68 @@ void AddStarPolyFilled(ImDrawList* dl, const ImVec2& center,
         dl->PrimWriteIdx(in0);
         dl->PrimWriteIdx(in1);
         // Fringe quad along the edge.
+        dl->PrimWriteIdx(in1);  dl->PrimWriteIdx(in0);  dl->PrimWriteIdx(out0);
+        dl->PrimWriteIdx(out0); dl->PrimWriteIdx(out1); dl->PrimWriteIdx(in1);
+    }
+}
+
+// Fill a polygon (`count` points, wound clockwise on screen) whose inside is given
+// as `triangle_count` triangles of indices into `points`: the same anti-aliased
+// fringe as AddStarPolyFilled (FringeOffset), but the solid part is those
+// triangles, so the shape need not be star-shaped. One mesh: no seam inside and
+// nothing painted twice. Used for the Radar Dash's dashes at any length
+// (cursor_finder::dash_stroke_boundary).
+void AddTriangulatedPolyFilled(ImDrawList* dl, const cursor_finder::MarkerPoint* points,
+                               int count, const int (*triangles)[3], int triangle_count,
+                               ImU32 col)
+{
+    if (count < 3 || triangle_count < 1 || (col & IM_COL32_A_MASK) == 0) { return; }
+    const ImVec2 uv = ImGui::GetFontTexUvWhitePixel();
+    auto at = [&](int i) { return ImVec2(points[i].x, points[i].y); };
+
+    if (!(dl->Flags & ImDrawListFlags_AntiAliasedFill))
+    {
+        dl->PrimReserve(triangle_count * 3, count);
+        const unsigned int base = dl->_VtxCurrentIdx;
+        for (int i = 0; i < count; ++i) { dl->PrimWriteVtx(at(i), uv, col); }
+        for (int t = 0; t < triangle_count; ++t)
+        {
+            for (int v = 0; v < 3; ++v)
+            {
+                dl->PrimWriteIdx(static_cast<ImDrawIdx>(base + triangles[t][v]));
+            }
+        }
+        return;
+    }
+
+    const float aa = dl->_FringeScale;
+    const ImU32 col_trans = col & ~IM_COL32_A_MASK;
+    dl->PrimReserve(triangle_count * 3 + count * 6, count * 2);
+    // Vertex layout: per boundary point an inner (solid) and an outer (transparent)
+    // vertex half the fringe either side of it.
+    const unsigned int inner_idx = dl->_VtxCurrentIdx;
+    for (int i = 0; i < count; ++i)
+    {
+        const ImVec2 dm = FringeOffset(points, count, i, aa);
+        const ImVec2 p = at(i);
+        dl->PrimWriteVtx(ImVec2(p.x - dm.x, p.y - dm.y), uv, col);       // inner
+        dl->PrimWriteVtx(ImVec2(p.x + dm.x, p.y + dm.y), uv, col_trans); // outer
+    }
+    // The solid triangles over the inner vertices.
+    for (int t = 0; t < triangle_count; ++t)
+    {
+        for (int v = 0; v < 3; ++v)
+        {
+            dl->PrimWriteIdx(static_cast<ImDrawIdx>(inner_idx + 2 * triangles[t][v]));
+        }
+    }
+    // The fringe quads along every edge.
+    for (int i0 = count - 1, i1 = 0; i1 < count; i0 = i1++)
+    {
+        const ImDrawIdx in0  = static_cast<ImDrawIdx>(inner_idx + 2 * i0);
+        const ImDrawIdx in1  = static_cast<ImDrawIdx>(inner_idx + 2 * i1);
+        const ImDrawIdx out0 = static_cast<ImDrawIdx>(in0 + 1);
+        const ImDrawIdx out1 = static_cast<ImDrawIdx>(in1 + 1);
         dl->PrimWriteIdx(in1);  dl->PrimWriteIdx(in0);  dl->PrimWriteIdx(out0);
         dl->PrimWriteIdx(out0); dl->PrimWriteIdx(out1); dl->PrimWriteIdx(in1);
     }
@@ -514,31 +583,34 @@ void DrawBeaconCrosshair(ImDrawList* dl, const ImVec2& center, float size,
     dl->AddCircleFilled(dot, g.dot_radius, colour, kDotSegments);
 }
 
-// The Radar Dash, drawn in code at marker size `size` (geometry from
-// cursor_finder::radar_dash_geometry): each dash a round-capped arc filled as one
-// mesh (cursor_finder::dash_stroke_boundary: no seam where a cap meets the body,
-// nothing painted twice), and the dot. The outline layer comes first (when
+// The Radar Dash, drawn in code at marker size `size` with `dash_count` dashes of
+// width `dash_width_pct` (geometry from cursor_finder::radar_dash_geometry): each
+// dash a round-capped arc (a round dot at width 0) filled as one mesh at any
+// length (cursor_finder::dash_stroke_boundary's triangles: no seam where a cap
+// meets the body, nothing painted twice), and the dot. The outline layer comes first (when
 // `draw_outline`): each dash's outline is the same round-capped arc at the wider
 // outline stroke, one mesh each, then the outline dot. Unlike the other presets'
-// fixed 2 px band, this outline scales with the marker as in the design, so the
-// gaps between the dashes stay open at any size. Being one mesh under the whole
+// fixed 2 px band, this outline scales with the marker as in the design, so with
+// the default dashes the gaps between them stay open at any size (many long
+// dashes' outlines touch or overlap). Being one mesh under the whole
 // dash, it shows through the colour below full opacity evenly, body and caps alike.
 // Then the colour dashes and dot, the same with the outline on or off. Used for the
 // marker and its style tile (colour only).
 void DrawRadarDash(ImDrawList* dl, const ImVec2& center, float size,
-                   ImU32 colour, bool draw_outline, ImU32 outline_colour)
+                   ImU32 colour, bool draw_outline, ImU32 outline_colour,
+                   int dash_count, int dash_width_pct)
 {
-    const cursor_finder::RadarDashGeometry g =
-        cursor_finder::radar_dash_geometry(center.x, center.y, size);
+    const cursor_finder::RadarDashGeometry g = cursor_finder::radar_dash_geometry(
+        center.x, center.y, size, dash_count, dash_width_pct);
     if (g.stroke <= 0.0f || (colour & IM_COL32_A_MASK) == 0) { return; }
     const ImVec2 dot(g.center.x, g.center.y);
     auto fill_dashes = [&](float stroke, ImU32 col) {
-        for (const cursor_finder::DashArc& dash : g.dashes)
+        for (int i = 0; i < g.dash_count; ++i)
         {
             const cursor_finder::DashBoundary boundary =
-                cursor_finder::dash_stroke_boundary(g.center, g.radius, stroke, dash);
-            AddStarPolyFilled(dl, ImVec2(boundary.fan_center.x, boundary.fan_center.y),
-                              boundary.points, boundary.count, col);
+                cursor_finder::dash_stroke_boundary(g.center, g.radius, stroke, g.dashes[i]);
+            AddTriangulatedPolyFilled(dl, boundary.points, boundary.count, boundary.triangles,
+                                      boundary.triangle_count, col);
         }
     };
     if (draw_outline)
@@ -612,7 +684,8 @@ void DrawSoftHalo(ImDrawList* dl, const ImVec2& center, float size, ImU32 colour
 // Draw a preset with its own routine. Shared by the marker, the panel preview and
 // the style tiles.
 void DrawCodePreset(ImDrawList* dl, cursor_finder::Preset preset, const ImVec2& center,
-                    float size, ImU32 colour, bool draw_outline, ImU32 outline_colour)
+                    float size, ImU32 colour, bool draw_outline, ImU32 outline_colour,
+                    int dash_count, int dash_width_pct)
 {
     switch (preset)
     {
@@ -626,7 +699,8 @@ void DrawCodePreset(ImDrawList* dl, cursor_finder::Preset preset, const ImVec2& 
             DrawBeaconCrosshair(dl, center, size, colour, draw_outline, outline_colour);
             break;
         case cursor_finder::Preset::RadarDash:
-            DrawRadarDash(dl, center, size, colour, draw_outline, outline_colour);
+            DrawRadarDash(dl, center, size, colour, draw_outline, outline_colour,
+                          dash_count, dash_width_pct);
             break;
         case cursor_finder::Preset::SoftHalo:
             DrawSoftHalo(dl, center, size, colour); // no outline
@@ -671,7 +745,8 @@ void DrawMarker(ImDrawList* dl, const ImVec2& center, const cursor_finder::Curso
 
     const ImU32 ring_colour  = LayerTint(s.colour, s.opacity_pct);
     const ImU32 ring_outline = OutlineTint(s.outline_colour, s.opacity_pct);
-    DrawCodePreset(dl, s.preset, center, size, ring_colour, draw_outline, ring_outline);
+    DrawCodePreset(dl, s.preset, center, size, ring_colour, draw_outline, ring_outline,
+                   s.dash_count, s.dash_width_pct);
 }
 
 // The classic pointer arrow from the reference design's `pointer-glyph`, drawn
@@ -812,13 +887,15 @@ void RenderPanel()
     };
 
     // A 3-part slider row (design size-row/opacity-row): a muted label in a
-    // fixed left column (96 au), the slider filling the middle, and the value
-    // (gold) right-aligned in a fixed trailing column (44 au). BEHAVIOUR is
+    // left column (96 au unless the caller passes a wider `label_w`), the slider
+    // filling the middle, and the value (gold) right-aligned in a fixed trailing
+    // column (44 au); `zero_text`, when given, is shown instead of the value at 0. BEHAVIOUR is
     // identical to a plain SliderInt — the caller still clamps and writes the
     // same field; this only relays the affordance. Returns true on change.
     auto SliderRow = [&pal](const char* label, const char* id, int* value,
-                            int vmin, int vmax, const char* value_fmt) -> bool {
-        const float label_w  = 96.0f; // design label-col
+                            int vmin, int vmax, const char* value_fmt,
+                            float label_w = 96.0f, // design label-col
+                            const char* zero_text = nullptr) -> bool {
         const float value_w  = 44.0f; // design value-col
         const float gap      = 12.0f; // design gap-col
         const float row_w    = ImGui::GetContentRegionAvail().x;
@@ -848,7 +925,14 @@ void RenderPanel()
 
         // Right value (gold), right-aligned within the 44-au trailing column.
         char buf[32];
-        std::snprintf(buf, sizeof(buf), value_fmt, *value);
+        if (zero_text != nullptr && *value == 0)
+        {
+            std::snprintf(buf, sizeof(buf), "%s", zero_text);
+        }
+        else
+        {
+            std::snprintf(buf, sizeof(buf), value_fmt, *value);
+        }
         const float tw = ImGui::CalcTextSize(buf).x;
         ImGui::SameLine(x0 + label_w + slider_w + gap * 2.0f + (value_w - tw));
         ImGui::AlignTextToFramePadding();
@@ -989,7 +1073,8 @@ void RenderPanel()
                 const cursor_finder::Rgb hue = cursor_finder::signature_hue(kPresets[i].p);
                 const ImU32 tint = IM_COL32(hue.r, hue.g, hue.b, 255);
                 DrawCodePreset(sdl, kPresets[i].p, ImVec2(cx, icon_cy), icon_half * 2.0f,
-                               tint, /*draw_outline=*/false, 0);
+                               tint, /*draw_outline=*/false, 0,
+                               s.dash_count, s.dash_width_pct);
 
                 const ImU32 lbl_col = active
                     ? shared::theme::to_u32(pal.text_gold)
@@ -1088,15 +1173,48 @@ void RenderPanel()
             }
         }
 
+        // The MARKER rows' label column: wide enough for the longest label in this
+        // font plus clearance before the slider, never under the design's 96. The
+        // same with Radar Dash selected or not, so the rows stay put.
+        float marker_label_w = 96.0f;
+        for (const char* label : {"Number of dashes", "Dash width", "Size", "Opacity"})
+        {
+            // (Not std::max: <Windows.h> defines a max macro here.)
+            const float w = ImGui::CalcTextSize(label).x + 12.0f;
+            if (w > marker_label_w) { marker_label_w = w; }
+        }
+
+        // Radar Dash only: its number of dashes and dash width (Cursor Settings
+        // v1.5). The values are kept while another style is selected.
+        if (s.preset == cursor_finder::Preset::RadarDash)
+        {
+            int dashes = s.dash_count;
+            if (SliderRow("Number of dashes", "##dash-count", &dashes,
+                          cursor_finder::kDashCountMin, cursor_finder::kDashCountMax, "%d",
+                          marker_label_w))
+            {
+                s.dash_count = cursor_finder::clamp_int(dashes, cursor_finder::kDashCountMin,
+                                                        cursor_finder::kDashCountMax);
+            }
+            int width = s.dash_width_pct;
+            if (SliderRow("Dash width", "##dash-width", &width, cursor_finder::kDashWidthMin,
+                          cursor_finder::kDashWidthMax, "%d%%", marker_label_w, "Dots"))
+            {
+                s.dash_width_pct = cursor_finder::snap_dash_width(width);
+            }
+        }
+
         // Size and Opacity — ranges from the reference design, relaid as
         // 3-part rows (design size-row/opacity-row). Behaviour is identical.
         int size = s.size_px;
-        if (SliderRow("Size", "##size", &size, cursor_finder::kSizeMin, cursor_finder::kSizeMax, "%d"))
+        if (SliderRow("Size", "##size", &size, cursor_finder::kSizeMin, cursor_finder::kSizeMax, "%d",
+                      marker_label_w))
         {
             s.size_px = cursor_finder::clamp_int(size, cursor_finder::kSizeMin, cursor_finder::kSizeMax);
         }
         int opacity = s.opacity_pct;
-        if (SliderRow("Opacity", "##opacity", &opacity, cursor_finder::kOpacityMin, cursor_finder::kOpacityMax, "%d%%"))
+        if (SliderRow("Opacity", "##opacity", &opacity, cursor_finder::kOpacityMin, cursor_finder::kOpacityMax, "%d%%",
+                      marker_label_w))
         {
             s.opacity_pct = cursor_finder::clamp_int(opacity, cursor_finder::kOpacityMin, cursor_finder::kOpacityMax);
         }

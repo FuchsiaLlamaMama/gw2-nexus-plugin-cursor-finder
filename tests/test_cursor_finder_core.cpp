@@ -223,8 +223,10 @@ TEST_CASE("appearance factory defaults match the design")
     CHECK(s.out_of_combat_mode == cursor_finder::OutOfCombatMode::Always); // v6: shown by default
     CHECK(s.in_combat_mode == cursor_finder::InCombatMode::Always);        // v6: shown by default
     CHECK_FALSE(s.welcomed);                                        // v7: a fresh install is NOT yet welcomed
-    // Schema bumped for the first-run welcomed flag (v7 added welcomed).
-    CHECK(cursor_finder::CursorSettings::kSchemaVersion == 7);
+    CHECK(s.dash_count == 9);                                       // v8: Radar Dash's 9 dashes
+    CHECK(s.dash_width_pct == 85);                                  // v8: close to the 004-17 dash
+    // Schema bumped for Radar Dash's number of dashes and dash width (v8).
+    CHECK(cursor_finder::CursorSettings::kSchemaVersion == 8);
 }
 
 // --- every appearance field round-trips through disk ---------------------------
@@ -245,6 +247,8 @@ TEST_CASE("every appearance field round-trips through disk")
     edited.fill_size_pct    = 45;
     edited.freeze_after_drag = true; // v4 field
     edited.show_quick_access_icon = false; // v5 field
+    edited.dash_count     = 13; // v8 fields
+    edited.dash_width_pct = 40;
     {
         cursor_finder::CursorStore store(tmp.path);
         CHECK(store.set(edited)); // write-through, value changed
@@ -266,7 +270,7 @@ TEST_CASE("appearance mutations are written through with no explicit flush")
     json on_disk = json::parse(read_disk(tmp.path));
     CHECK(on_disk["preset"] == "radar_dash");
     CHECK(on_disk["colour"] == "#0a0b0c");
-    CHECK(on_disk["schema_version"] == 7);
+    CHECK(on_disk["schema_version"] == 8);
 }
 
 // --- the v1 -> v2 migration ---------------------------------------------------
@@ -293,7 +297,7 @@ TEST_CASE("a v1 file loads with appearance defaulted, then re-stamps v2")
     // Any mutation re-stamps the file at v2 with the appearance keys present.
     store.set_enabled(true);
     json on_disk = json::parse(read_disk(tmp.path));
-    CHECK(on_disk["schema_version"] == 7);
+    CHECK(on_disk["schema_version"] == 8);
     REQUIRE(on_disk.contains("preset"));
     CHECK(on_disk["preset"] == "pulse_ring");
     CHECK(on_disk["outline"] == true);
@@ -340,6 +344,77 @@ TEST_CASE("out-of-range size/opacity/fill-opacity are clamped on read")
     CHECK(hi.settings().size_px == cursor_finder::kSizeMax);          // 9999 -> 100
 }
 
+// --- v8: Radar Dash's number of dashes and dash width -------------------------
+
+TEST_CASE("dash width snaps to the 5 % step, inside 0-100")
+{
+    CHECK(cursor_finder::snap_dash_width(0)   == 0);
+    CHECK(cursor_finder::snap_dash_width(2)   == 0);
+    CHECK(cursor_finder::snap_dash_width(3)   == 5);
+    CHECK(cursor_finder::snap_dash_width(82)  == 80);
+    CHECK(cursor_finder::snap_dash_width(83)  == 85);
+    CHECK(cursor_finder::snap_dash_width(85)  == 85);
+    CHECK(cursor_finder::snap_dash_width(100) == 100);
+    CHECK(cursor_finder::snap_dash_width(101) == 100);
+    CHECK(cursor_finder::snap_dash_width(-3)  == 0);
+    CHECK(cursor_finder::kDashCountMin == 4);
+    CHECK(cursor_finder::kDashCountMax == 16);
+    CHECK(cursor_finder::kDashWidthMin == 0);
+    CHECK(cursor_finder::kDashWidthMax == 100);
+    CHECK(cursor_finder::kDashWidthStep == 5);
+}
+
+TEST_CASE("dash count and width are clamped, and width snapped, on read")
+{
+    TempStorePath tmp;
+    auto load = [&](const char* text) {
+        {
+            std::ofstream out(tmp.path, std::ios::binary);
+            out << text;
+        }
+        return cursor_finder::CursorStore(tmp.path).settings();
+    };
+    const cursor_finder::CursorSettings lo =
+        load(R"({"schema_version":8,"dash_count":2,"dash_width_pct":-5})");
+    CHECK(lo.dash_count == 4);
+    CHECK(lo.dash_width_pct == 0);
+    const cursor_finder::CursorSettings hi =
+        load(R"({"schema_version":8,"dash_count":30,"dash_width_pct":150})");
+    CHECK(hi.dash_count == 16);
+    CHECK(hi.dash_width_pct == 100);
+    CHECK(load(R"({"schema_version":8,"dash_count":9,"dash_width_pct":83})").dash_width_pct == 85);
+    CHECK(load(R"({"schema_version":8,"dash_count":9,"dash_width_pct":82})").dash_width_pct == 80);
+}
+
+TEST_CASE("a v7 file loads with the default dash count and width, then re-stamps v8")
+{
+    TempStorePath tmp;
+    {
+        std::ofstream out(tmp.path, std::ios::binary);
+        out << R"({"schema_version":7,"preset":"radar_dash","welcomed":true})";
+    }
+    cursor_finder::CursorStore store(tmp.path);
+    CHECK(store.settings().preset == cursor_finder::Preset::RadarDash);
+    CHECK(store.settings().dash_count == 9);
+    CHECK(store.settings().dash_width_pct == 85);
+    store.set_enabled(false);
+    json on_disk = json::parse(read_disk(tmp.path));
+    CHECK(on_disk["schema_version"] == 8);
+    CHECK(on_disk["dash_count"] == 9);
+    CHECK(on_disk["dash_width_pct"] == 85);
+}
+
+TEST_CASE("dash count and width take part in settings equality")
+{
+    const cursor_finder::CursorSettings a = cursor_finder::CursorSettings::defaults();
+    cursor_finder::CursorSettings b = a;
+    b.dash_count = 10;
+    CHECK(a != b);
+    b = a;
+    b.dash_width_pct = 50;
+    CHECK(a != b);
+}
+
 // --- Reset to defaults --------------------------------------------------------
 
 TEST_CASE("reset to defaults restores the default appearance")
@@ -352,6 +427,8 @@ TEST_CASE("reset to defaults restores the default appearance")
     messed.size_px = 100;
     messed.outline = false;
     messed.fill = true;
+    messed.dash_count = 16;
+    messed.dash_width_pct = 0;
     CHECK(store.set(messed));
 
     // Reset == writing the factory defaults through the store (what the panel's
@@ -866,11 +943,27 @@ constexpr float kTwoPi = 2.0f * kPi;
 
 float degrees(float radians) { return radians * 180.0f / kPi; }
 
-// The design's dash pattern spread evenly over the circle: 9 periods, each 26 parts
-// dash and 22 parts gap.
-constexpr float kDashPeriod = kTwoPi / 9.0f;
-constexpr float kDashLength = kDashPeriod * 26.0f / 48.0f;
-constexpr float kGapLength  = kDashPeriod * 22.0f / 48.0f;
+// The default Radar Dash: 9 dashes at 85 % width.
+constexpr int kDefaultDashes = 9;
+constexpr int kDefaultWidth  = 85;
+
+// The design's dash (DASH-CHANGES.md, 200-unit box): on the circle r 72 with stroke
+// 11, N dashes of period P = 2 pi 72 / N; width w (0-100) is t = w / 100 x 0.75 of the
+// design's scale, and the centre line of a dash, cap centre to cap centre, is
+// D = (P - min(11, P)) t / 0.9. Half of it as an angle about the ring centre.
+float expected_half_body(int n, int width)
+{
+    const float period = kTwoPi * 72.0f / static_cast<float>(n);
+    const float t = static_cast<float>(width) / 100.0f * 0.75f;
+    const float body = (period - std::min(11.0f, period)) * t / 0.9f;
+    return 0.5f * body / 72.0f;
+}
+
+// Dash k's centre: 12 o'clock, then clockwise by 360 / N degrees each.
+float expected_centre(int n, int k)
+{
+    return -0.5f * kPi + kTwoPi * static_cast<float>(k) / static_cast<float>(n);
+}
 
 // The point at `angle` on the circle of `radius` about `c`: angle 0 is 3 o'clock
 // and a growing angle turns clockwise on screen (y down).
@@ -907,7 +1000,8 @@ float distance_to_arc(const MarkerPoint& p, const MarkerPoint& c, float radius,
 // it fills as one triangle fan from the middle of the centre line with no two
 // triangles overlapping: nothing is painted twice. Checked for the colour (the
 // dash's stroke) and for its outline (the outline's wider stroke).
-void check_dash_boundary(const cursor_finder::RadarDashGeometry& g, int dash, float stroke)
+void check_dash_boundary(const cursor_finder::RadarDashGeometry& g, int dash, float stroke,
+                         bool fills_as_one_fan = true)
 {
     const cursor_finder::DashArc& arc = g.dashes[dash];
     const MarkerPoint& c = g.center;
@@ -964,7 +1058,9 @@ void check_dash_boundary(const cursor_finder::RadarDashGeometry& g, int dash, fl
     }
 
     // The fan from the middle: every triangle turns the same way and the fan goes
-    // round exactly once.
+    // round exactly once. (Holds for short dashes only; long ones are checked by
+    // their triangulation instead.)
+    if (!fills_as_one_fan) { return; }
     const MarkerPoint& f = boundary.fan_center;
     const int n = boundary.count;
     float turned = 0.0f;
@@ -1004,9 +1100,10 @@ TEST_CASE("the radar-dash geometry is the design's ring at size 200")
     // Design (assets/svg/radar-dash-colour.svg): circle r 72, stroke 11, round caps,
     // dot r 6. Its outline layer (assets/svg/radar-dash-outline.svg): the same circle
     // and dash pattern at stroke 17, dot r 9.
-    const cursor_finder::RadarDashGeometry g =
-        cursor_finder::radar_dash_geometry(100.0f, 100.0f, 200.0f);
+    const cursor_finder::RadarDashGeometry g = cursor_finder::radar_dash_geometry(
+        100.0f, 100.0f, 200.0f, kDefaultDashes, kDefaultWidth);
     expect_point(g.center, MarkerPoint{100.0f, 100.0f});
+    CHECK(g.dash_count         == kDefaultDashes);
     CHECK(g.radius             == doctest::Approx(72.0f));
     CHECK(g.stroke             == doctest::Approx(11.0f));
     CHECK(g.dot_radius         == doctest::Approx(6.0f));
@@ -1014,118 +1111,238 @@ TEST_CASE("the radar-dash geometry is the design's ring at size 200")
     CHECK(g.outline_dot_radius == doctest::Approx(9.0f));
 }
 
-TEST_CASE("the radar dash has nine equal dashes, clockwise from 3 o'clock, 26 : 22")
+TEST_CASE("the radar dash has N equal dashes, one centred at 12 o'clock, by the design's formula")
 {
-    const cursor_finder::RadarDashGeometry g =
-        cursor_finder::radar_dash_geometry(300.0f, 200.0f, 100.0f);
-    REQUIRE(cursor_finder::kRadarDashCount == 9);
-    // The first dash's body starts at 3 o'clock and runs about 21.7 degrees.
-    CHECK(degrees(g.dashes[0].start) == doctest::Approx(0.0f));
-    CHECK(degrees(g.dashes[0].end)   == doctest::Approx(40.0f * 26.0f / 48.0f));
-    for (int i = 0; i < cursor_finder::kRadarDashCount; ++i)
+    REQUIRE(cursor_finder::kRadarDashMaxCount == 16);
+    for (int n = 4; n <= 16; ++n)
     {
-        CAPTURE(i);
-        const cursor_finder::DashArc& d = g.dashes[i];
-        const float next_start = i + 1 < cursor_finder::kRadarDashCount
-            ? g.dashes[i + 1].start : kTwoPi; // the last gap ends back at 3 o'clock
-        CHECK(d.start == doctest::Approx(kDashPeriod * static_cast<float>(i)));
-        CHECK(d.end - d.start == doctest::Approx(kDashLength));
-        CHECK(next_start - d.end == doctest::Approx(kGapLength));
-        CHECK((d.end - d.start) / (next_start - d.end) == doctest::Approx(26.0f / 22.0f));
+        for (int w = 0; w <= 100; w += 5)
+        {
+            CAPTURE(n);
+            CAPTURE(w);
+            const cursor_finder::RadarDashGeometry g =
+                cursor_finder::radar_dash_geometry(300.0f, 200.0f, 74.0f, n, w);
+            REQUIRE(g.dash_count == n);
+            const float half = expected_half_body(n, w);
+            for (int k = 0; k < n; ++k)
+            {
+                CAPTURE(k);
+                const cursor_finder::DashArc& d = g.dashes[k];
+                CHECK(0.5f * (d.start + d.end) == doctest::Approx(expected_centre(n, k)));
+                CHECK(0.5f * (d.end - d.start) == doctest::Approx(half).epsilon(1e-4));
+            }
+        }
     }
-
-    // Clockwise on screen: the first dash's outer side leaves 3 o'clock heading
-    // down (y grows), and the circle just above 3 o'clock is in the last gap.
-    const cursor_finder::DashBoundary first =
-        cursor_finder::dash_stroke_boundary(g.center, g.radius, g.stroke, g.dashes[0]);
-    REQUIRE(first.count > cursor_finder::kDashArcSteps);
-    expect_point(first.points[0], MarkerPoint{g.center.x + g.radius + 0.5f * g.stroke, g.center.y});
-    for (int k = 1; k <= cursor_finder::kDashArcSteps; ++k)
-    {
-        CAPTURE(k);
-        CHECK(first.points[k].y > first.points[k - 1].y);
-    }
-    const float just_above = kTwoPi - 0.01f; // 0.01 rad anticlockwise of 3 o'clock
-    const cursor_finder::DashArc& last = g.dashes[cursor_finder::kRadarDashCount - 1];
-    CHECK(just_above > last.end);
+    // Worked values: the default dash is about 22.1 degrees (004-17's was 21.7), the
+    // widest 9-dash one about 26.0, and width 0 is a dot (no body).
+    const cursor_finder::RadarDashGeometry def =
+        cursor_finder::radar_dash_geometry(0.0f, 0.0f, 200.0f, 9, 85);
+    CHECK(degrees(def.dashes[0].end - def.dashes[0].start) == doctest::Approx(22.13f).epsilon(1e-3));
+    const cursor_finder::RadarDashGeometry widest =
+        cursor_finder::radar_dash_geometry(0.0f, 0.0f, 200.0f, 9, 100);
+    CHECK(degrees(widest.dashes[0].end - widest.dashes[0].start) ==
+          doctest::Approx(26.03f).epsilon(1e-3));
+    const cursor_finder::RadarDashGeometry dots =
+        cursor_finder::radar_dash_geometry(0.0f, 0.0f, 200.0f, 9, 0);
+    CHECK(dots.dashes[0].end == doctest::Approx(dots.dashes[0].start));
 }
 
-TEST_CASE("the radar dash's dashes and gaps cover the circle exactly, with no overlap")
+TEST_CASE("the radar dash's first dash sits at the top and the rest follow clockwise")
 {
     const cursor_finder::RadarDashGeometry g =
-        cursor_finder::radar_dash_geometry(0.0f, 0.0f, 74.0f);
-    float covered = 0.0f;
-    for (int i = 0; i < cursor_finder::kRadarDashCount; ++i)
-    {
-        CAPTURE(i);
-        const cursor_finder::DashArc& d = g.dashes[i];
-        CHECK(d.start >= 0.0f);
-        CHECK(d.end > d.start);
-        CHECK(d.end < kTwoPi);
-        if (i + 1 < cursor_finder::kRadarDashCount)
+        cursor_finder::radar_dash_geometry(300.0f, 200.0f, 100.0f, kDefaultDashes, kDefaultWidth);
+    const auto mid = [&](int k) {
+        return on_circle(g.center, g.radius, 0.5f * (g.dashes[k].start + g.dashes[k].end));
+    };
+    expect_point(mid(0), MarkerPoint{g.center.x, g.center.y - g.radius});
+    // Clockwise on screen (y down): the next dash is to the right of the top one, and
+    // the last is to its left.
+    CHECK(mid(1).x > g.center.x);
+    CHECK(mid(kDefaultDashes - 1).x < g.center.x);
+}
+
+TEST_CASE("out-of-range dash counts and widths are clamped like the settings")
+{
+    const auto same = [](const cursor_finder::RadarDashGeometry& a,
+                         const cursor_finder::RadarDashGeometry& b) {
+        REQUIRE(a.dash_count == b.dash_count);
+        for (int k = 0; k < a.dash_count; ++k)
         {
-            CHECK(d.end < g.dashes[i + 1].start);
+            CHECK(a.dashes[k].start == doctest::Approx(b.dashes[k].start));
+            CHECK(a.dashes[k].end   == doctest::Approx(b.dashes[k].end));
         }
-        covered += d.end - d.start;
-    }
-    // Dashes plus gaps make exactly one turn.
-    CHECK(covered + static_cast<float>(cursor_finder::kRadarDashCount) * kGapLength ==
-          doctest::Approx(kTwoPi));
-    // Every direction lies in at most one dash.
-    for (int k = 0; k < 3600; ++k)
+    };
+    same(cursor_finder::radar_dash_geometry(0.0f, 0.0f, 80.0f, 2, -5),
+         cursor_finder::radar_dash_geometry(0.0f, 0.0f, 80.0f, 4, 0));
+    same(cursor_finder::radar_dash_geometry(0.0f, 0.0f, 80.0f, 30, 150),
+         cursor_finder::radar_dash_geometry(0.0f, 0.0f, 80.0f, 16, 100));
+}
+
+TEST_CASE("the gap between neighbouring radar dashes never closes, at any count and width")
+{
+    // The owner's rule: the dashes never join into a ring (Ring is its own style).
+    // Between two round ends the gap is narrowest along the chord joining the ends
+    // of their centre lines: that chord less one stroke. In design units.
+    for (int n = 4; n <= 16; ++n)
     {
-        const float a = kTwoPi * static_cast<float>(k) / 3600.0f;
-        int in = 0;
-        for (const cursor_finder::DashArc& d : g.dashes)
+        for (int w = 0; w <= 100; w += 5)
         {
-            if (a >= d.start && a <= d.end) { ++in; }
+            CAPTURE(n);
+            CAPTURE(w);
+            const cursor_finder::RadarDashGeometry g =
+                cursor_finder::radar_dash_geometry(0.0f, 0.0f, 200.0f, n, w);
+            for (int k = 0; k < n; ++k)
+            {
+                CAPTURE(k);
+                const cursor_finder::DashArc& a = g.dashes[k];
+                const cursor_finder::DashArc& b = g.dashes[(k + 1) % n];
+                const float apart = std::remainder(b.start - a.end, kTwoPi);
+                CHECK(apart > 0.0f);
+                const float gap = 2.0f * g.radius * std::sin(0.5f * apart) - g.stroke;
+                CHECK(gap > 2.5f); // 2.86 at the narrowest: 16 dashes, 100 %
+            }
         }
-        CHECK(in <= 1);
     }
 }
 
 TEST_CASE("the radar dash scales with size, its outline too, as in the design")
 {
-    const cursor_finder::RadarDashGeometry design =
-        cursor_finder::radar_dash_geometry(0.0f, 0.0f, 200.0f);
-    const float cx = 640.0f, cy = 360.0f;
-    for (const float size : kDrawnSizes)
+    for (const int n : {kDefaultDashes, 16})
     {
-        CAPTURE(size);
-        const float s = size / 200.0f;
-        const cursor_finder::RadarDashGeometry g =
-            cursor_finder::radar_dash_geometry(cx, cy, size);
-        expect_point(g.center, MarkerPoint{cx, cy});
-        CHECK(g.radius     == doctest::Approx(72.0f * s));
-        CHECK(g.stroke     == doctest::Approx(11.0f * s));
-        CHECK(g.dot_radius == doctest::Approx(6.0f * s));
-        // The dash angles do not change with size.
-        for (int i = 0; i < cursor_finder::kRadarDashCount; ++i)
+        const int w = n == 16 ? 100 : kDefaultWidth;
+        const cursor_finder::RadarDashGeometry design =
+            cursor_finder::radar_dash_geometry(0.0f, 0.0f, 200.0f, n, w);
+        const float cx = 640.0f, cy = 360.0f;
+        for (const float size : kDrawnSizes)
         {
-            CHECK(g.dashes[i].start == doctest::Approx(design.dashes[i].start));
-            CHECK(g.dashes[i].end   == doctest::Approx(design.dashes[i].end));
+            CAPTURE(n);
+            CAPTURE(size);
+            const float s = size / 200.0f;
+            const cursor_finder::RadarDashGeometry g =
+                cursor_finder::radar_dash_geometry(cx, cy, size, n, w);
+            expect_point(g.center, MarkerPoint{cx, cy});
+            CHECK(g.radius     == doctest::Approx(72.0f * s));
+            CHECK(g.stroke     == doctest::Approx(11.0f * s));
+            CHECK(g.dot_radius == doctest::Approx(6.0f * s));
+            // The dash angles do not change with size.
+            for (int i = 0; i < n; ++i)
+            {
+                CHECK(g.dashes[i].start == doctest::Approx(design.dashes[i].start));
+                CHECK(g.dashes[i].end   == doctest::Approx(design.dashes[i].end));
+            }
+            // The outline is scaled with the marker, not a fixed band: stroke 17 and
+            // dot r 9 of the design's 200 units, so it reaches 3 units beyond the
+            // colour on every side of each dash and round the dot.
+            CHECK(g.outline_stroke     == doctest::Approx(17.0f * s));
+            CHECK(g.outline_dot_radius == doctest::Approx(9.0f * s));
+            CHECK(0.5f * (g.outline_stroke - g.stroke) == doctest::Approx(3.0f * s));
+            CHECK(g.outline_dot_radius - g.dot_radius  == doctest::Approx(3.0f * s));
         }
-        // The outline is scaled with the marker, not a fixed band: stroke 17 and
-        // dot r 9 of the design's 200 units, so it reaches 3 units beyond the colour
-        // on every side of each dash and round the dot.
-        CHECK(g.outline_stroke     == doctest::Approx(17.0f * s));
-        CHECK(g.outline_dot_radius == doctest::Approx(9.0f * s));
-        CHECK(0.5f * (g.outline_stroke - g.stroke) == doctest::Approx(3.0f * s));
-        CHECK(g.outline_dot_radius - g.dot_radius  == doctest::Approx(3.0f * s));
     }
 }
 
-TEST_CASE("a radar dash is a round-capped arc that fills as one fan from its middle")
+TEST_CASE("a default radar dash is a round-capped arc that fills as one fan from its middle")
 {
     for (const float size : kDrawnSizes)
     {
-        const cursor_finder::RadarDashGeometry g =
-            cursor_finder::radar_dash_geometry(300.0f, 200.0f, size);
-        for (int i = 0; i < cursor_finder::kRadarDashCount; ++i)
+        const cursor_finder::RadarDashGeometry g = cursor_finder::radar_dash_geometry(
+            300.0f, 200.0f, size, kDefaultDashes, kDefaultWidth);
+        for (int i = 0; i < g.dash_count; ++i)
         {
             CAPTURE(size);
             CAPTURE(i);
             check_dash_boundary(g, i, g.stroke);
+        }
+    }
+}
+
+TEST_CASE("every radar dash is round-capped and fills as one triangulated mesh, at any length")
+{
+    for (int n = 4; n <= 16; ++n)
+    {
+        for (int w = 0; w <= 100; w += 5)
+        {
+            for (const float size : {200.0f, 23.0f})
+            {
+                const cursor_finder::RadarDashGeometry g =
+                    cursor_finder::radar_dash_geometry(300.0f, 200.0f, size, n, w);
+                for (const float stroke : {g.stroke, g.outline_stroke})
+                {
+                    for (int i = 0; i < n; ++i)
+                    {
+                        CAPTURE(n);
+                        CAPTURE(w);
+                        CAPTURE(size);
+                        CAPTURE(stroke);
+                        CAPTURE(i);
+                        // The shape: every point at half the stroke from the centre
+                        // line, round caps meeting the body at its corners.
+                        check_dash_boundary(g, i, stroke, /*fills_as_one_fan=*/false);
+                        // The fill: count - 2 triangles over the boundary's own points,
+                        // each wound like the boundary, none flat, adding up to the
+                        // boundary's area: nothing painted twice, nothing missing.
+                        const cursor_finder::DashBoundary b =
+                            cursor_finder::dash_stroke_boundary(g.center, g.radius, stroke,
+                                                                g.dashes[i]);
+                        REQUIRE(b.triangle_count == b.count - 2);
+                        // Areas in double about the ring centre: in float at screen
+                        // coordinates a tiny dash's area is lost to rounding.
+                        const auto area = [&](const MarkerPoint* pts, int count) {
+                            double twice = 0.0;
+                            for (int v = 0; v < count; ++v)
+                            {
+                                const MarkerPoint& p = pts[v];
+                                const MarkerPoint& q = pts[(v + 1) % count];
+                                const double px = p.x - g.center.x, py = p.y - g.center.y;
+                                const double qx = q.x - g.center.x, qy = q.y - g.center.y;
+                                twice += px * qy - qx * py;
+                            }
+                            return twice;
+                        };
+                        double sum = 0.0;
+                        for (int t = 0; t < b.triangle_count; ++t)
+                        {
+                            MarkerPoint tri[3];
+                            for (int v = 0; v < 3; ++v)
+                            {
+                                const int idx = b.triangles[t][v];
+                                REQUIRE(idx >= 0);
+                                REQUIRE(idx < b.count);
+                                tri[v] = b.points[idx];
+                            }
+                            const double a2 = area(tri, 3);
+                            CHECK(a2 > 0.0);
+                            sum += a2;
+                        }
+                        CHECK(sum == doctest::Approx(area(b.points, b.count)).epsilon(1e-4));
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("a width-0 radar dash is one round dot as wide as the stroke")
+{
+    const cursor_finder::RadarDashGeometry g =
+        cursor_finder::radar_dash_geometry(300.0f, 200.0f, 100.0f, 9, 0);
+    for (const float stroke : {g.stroke, g.outline_stroke})
+    {
+        for (int i = 0; i < g.dash_count; ++i)
+        {
+            CAPTURE(stroke);
+            CAPTURE(i);
+            const cursor_finder::DashArc& d = g.dashes[i];
+            const MarkerPoint c = on_circle(g.center, g.radius, d.start);
+            const cursor_finder::DashBoundary b =
+                cursor_finder::dash_stroke_boundary(g.center, g.radius, stroke, d);
+            CHECK(b.count == 2 * cursor_finder::kDashCapSteps);
+            for (int k = 0; k < b.count; ++k)
+            {
+                CHECK(distance(b.points[k], c) == doctest::Approx(0.5f * stroke).epsilon(1e-3));
+            }
+            // A dot is star-shaped from its centre: it fills as one fan there too.
+            check_dash_boundary(g, i, stroke);
         }
     }
 }
@@ -1136,27 +1353,24 @@ TEST_CASE("a radar dash's outline is the same round-capped arc, 3 units wider al
     {
         CAPTURE(size);
         const float s = size / 200.0f;
-        const cursor_finder::RadarDashGeometry g =
-            cursor_finder::radar_dash_geometry(300.0f, 200.0f, size);
+        const cursor_finder::RadarDashGeometry g = cursor_finder::radar_dash_geometry(
+            300.0f, 200.0f, size, kDefaultDashes, kDefaultWidth);
         const MarkerPoint& c = g.center;
         const float h = 0.5f * g.stroke;
         const float outer_h = 0.5f * g.outline_stroke;
         // The fan point sees the whole inner side while half the dash's body is less
         // than the angle at which a line from it touches the inner edge circle,
         // acos(inner edge / radius): for the outline 63.5 of 72 units, about 28.1
-        // degrees against 10.8, the same at every size.
-        const float half_body = 0.5f * kDashLength;
+        // degrees against 11.1 for the default dash, the same at every size.
+        const float half_body = 0.5f * (g.dashes[0].end - g.dashes[0].start);
         const float in_view = std::acos((g.radius - outer_h) / g.radius);
         CHECK(degrees(in_view) == doctest::Approx(degrees(std::acos(63.5f / 72.0f))));
-        CHECK(degrees(half_body) == doctest::Approx(10.8333f));
+        CHECK(degrees(half_body) == doctest::Approx(11.06f).epsilon(1e-3));
         CHECK(half_body < in_view);
-        for (int i = 0; i < cursor_finder::kRadarDashCount; ++i)
+        for (int i = 0; i < g.dash_count; ++i)
         {
             CAPTURE(i);
             const cursor_finder::DashArc& d = g.dashes[i];
-            // Round-capped at the outline's stroke over the dash's own body angles,
-            // and one fan from the middle of its centre line: one mesh, nothing
-            // painted twice in the outline layer.
             check_dash_boundary(g, i, g.outline_stroke);
             // Every point of the outline's edge lies 3 units beyond the colour's
             // edge: along both sides and round both caps.
@@ -1175,26 +1389,27 @@ TEST_CASE("a radar dash's outline is the same round-capped arc, 3 units wider al
     }
 }
 
-TEST_CASE("the gap between neighbouring radar-dash outlines stays open at every size")
+TEST_CASE("with the default dashes, the gap between neighbouring outlines stays open at every size")
 {
+    // Default settings only (9 dashes, 85 %): at the narrow end of the range the
+    // outlines touch or overlap, which the owner judges in game (slice 004-20, A2).
     for (const float size : kDrawnSizes)
     {
         CAPTURE(size);
         const float s = size / 200.0f;
-        const cursor_finder::RadarDashGeometry g =
-            cursor_finder::radar_dash_geometry(300.0f, 200.0f, size);
+        const cursor_finder::RadarDashGeometry g = cursor_finder::radar_dash_geometry(
+            300.0f, 200.0f, size, kDefaultDashes, kDefaultWidth);
         const MarkerPoint& c = g.center;
-        // Between two round ends, the gap is narrowest along the chord joining the
-        // ends of the centre line: that chord less one stroke.
-        const float chord = 2.0f * g.radius * std::sin(0.5f * kGapLength);
+        const float apart = std::remainder(g.dashes[1].start - g.dashes[0].end, kTwoPi);
+        const float chord = 2.0f * g.radius * std::sin(0.5f * apart);
         const float gap_off = chord - g.stroke;
         const float gap_on  = chord - g.outline_stroke;
-        CHECK(gap_on == doctest::Approx((2.0f * 72.0f * std::sin(0.5f * kGapLength) - 17.0f) * s));
+        CHECK(gap_on == doctest::Approx((2.0f * 72.0f * std::sin(0.5f * apart) - 17.0f) * s));
         CHECK(gap_on > 0.5f);
-        for (int i = 0; i < cursor_finder::kRadarDashCount; ++i)
+        for (int i = 0; i < g.dash_count; ++i)
         {
             CAPTURE(i);
-            const int j = (i + 1) % cursor_finder::kRadarDashCount;
+            const int j = (i + 1) % g.dash_count;
             // The polygons the DLL fills lie just inside their round shapes, so they
             // come no closer than that and only a little further apart.
             const float colours = polygon_distance(
@@ -1236,8 +1451,8 @@ TEST_CASE("a non-positive marker size yields an empty radar dash and soft halo")
     for (const float size : {0.0f, -5.0f})
     {
         CAPTURE(size);
-        const cursor_finder::RadarDashGeometry g =
-            cursor_finder::radar_dash_geometry(50.0f, 60.0f, size);
+        const cursor_finder::RadarDashGeometry g = cursor_finder::radar_dash_geometry(
+            50.0f, 60.0f, size, kDefaultDashes, kDefaultWidth);
         CHECK(g.radius             == doctest::Approx(0.0f));
         CHECK(g.stroke             == doctest::Approx(0.0f));
         CHECK(g.dot_radius         == doctest::Approx(0.0f));
@@ -1246,6 +1461,8 @@ TEST_CASE("a non-positive marker size yields an empty radar dash and soft halo")
         for (const cursor_finder::DashArc& d : g.dashes)
         {
             CHECK(cursor_finder::dash_stroke_boundary(g.center, g.radius, g.stroke, d).count == 0);
+            CHECK(cursor_finder::dash_stroke_boundary(g.center, g.radius, g.stroke, d)
+                      .triangle_count == 0);
             CHECK(cursor_finder::dash_stroke_boundary(g.center, g.radius, g.outline_stroke, d)
                       .count == 0);
         }
@@ -1283,7 +1500,7 @@ TEST_CASE("a v3 file (no freeze_after_drag) migrates forward to v4 with the defa
     next.freeze_after_drag = true;
     CHECK(store.set(next));
     json on_disk = json::parse(read_disk(tmp.path));
-    CHECK(on_disk["schema_version"] == 7); // re-stamped at the current version
+    CHECK(on_disk["schema_version"] == 8); // re-stamped at the current version
     CHECK(on_disk["freeze_after_drag"] == true);
 }
 
@@ -1309,7 +1526,7 @@ TEST_CASE("a v4 file (no show_quick_access_icon) migrates forward to v5 with the
     next.show_quick_access_icon = false;
     CHECK(store.set(next));
     json on_disk = json::parse(read_disk(tmp.path));
-    CHECK(on_disk["schema_version"] == 7);
+    CHECK(on_disk["schema_version"] == 8);
     CHECK(on_disk["show_quick_access_icon"] == false);
 
     cursor_finder::CursorStore reloaded(tmp.path);
@@ -1678,7 +1895,7 @@ TEST_CASE("a v5 file (no visibility modes) migrates forward to v6 with the defau
     next.in_combat_mode     = cursor_finder::InCombatMode::Never;
     CHECK(store.set(next));
     json on_disk = json::parse(read_disk(tmp.path));
-    CHECK(on_disk["schema_version"] == 7);
+    CHECK(on_disk["schema_version"] == 8);
     CHECK(on_disk["out_of_combat_mode"] == "while_moving");
     CHECK(on_disk["in_combat_mode"] == "never");
 
@@ -1769,7 +1986,7 @@ TEST_CASE("an existing v6 file (no welcomed key) migrates forward as ALREADY wel
     next.enabled = false;
     CHECK(store.set(next));
     json on_disk = json::parse(read_disk(tmp.path));
-    CHECK(on_disk["schema_version"] == 7);
+    CHECK(on_disk["schema_version"] == 8);
     CHECK(on_disk["welcomed"] == true);
 }
 

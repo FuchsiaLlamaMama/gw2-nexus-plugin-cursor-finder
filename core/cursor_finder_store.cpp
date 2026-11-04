@@ -233,6 +233,16 @@ CursorSettings read_settings(const json& doc)
     // explicit persisted value is honoured so welcomed round-trips at v7.
     s.welcomed = true; // migration default for a v<7 / absent-key file
     if (auto b = read_bool(doc, "welcomed")) { s.welcomed = *b; }
+    // v8 Radar Dash. Absent in a v1-v7 file -> the defaults: that IS the v7 -> v8
+    // forward migration. The width is snapped to its step as well as clamped.
+    if (auto n = read_clamped_int(doc, "dash_count", kDashCountMin, kDashCountMax))
+    {
+        s.dash_count = *n;
+    }
+    if (auto n = read_clamped_int(doc, "dash_width_pct", kDashWidthMin, kDashWidthMax))
+    {
+        s.dash_width_pct = snap_dash_width(*n);
+    }
     return s;
 }
 
@@ -290,6 +300,8 @@ std::string CursorStore::serialize() const
     doc["in_combat_mode"]     = in_combat_to_slug(settings_.in_combat_mode);
     // v7 first-run flag.
     doc["welcomed"]           = settings_.welcomed;
+    doc["dash_count"]         = settings_.dash_count;
+    doc["dash_width_pct"]     = settings_.dash_width_pct;
     return doc.dump(2);
 }
 

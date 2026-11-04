@@ -29,15 +29,19 @@ colour at 90 % of the marker's opacity:
   dot r 9, so the outline reaches 3 units of the 200-unit design beyond the colour
   all around each dash and the dot (about 0.6 px at size 40, 1.5 px at 100). Each
   dash's outline is one mesh under the whole dash, so body and round ends keep
-  one even tone below full opacity, and the gaps between the outlines stay open
-  at every size. The dashes look the same with the outline on or off.
+  one even tone below full opacity. With the default dashes the gaps between the
+  outlines stay open at every size; with many long dashes the outlines touch or
+  overlap. The dashes look the same with the outline on or off.
 - Every other centre dot: a dot 2 px larger.
 - Soft Halo has no outline.
 
-**Radar Dash's dashes are equal.** The design's dash pattern (26 on, 22 off) does
-not fit its circle a whole number of times, which leaves the last dash shorter.
-The drawn ring has 9 equal periods in the same 26 : 22 ratio instead, the first
-dash starting at 3 o'clock and running clockwise, where the design's starts.
+**Radar Dash's dashes are equal, and the player shapes them.** The ring has 4 to
+16 equal dashes (default 9) and a dash width from round dots (0 %) to long dashes
+that still leave a gap (100 %, default 85 %). Dash width follows the settings
+design's formula: with period P = 2 pi 72 / N in the 200-unit box and
+t = width / 100 x 0.75, each dash's centre line is (P - min(11, P)) t / 0.9, cap
+centre to cap centre. The first dash is centred at 12 o'clock and the rest follow
+clockwise.
 
 ### Signature hues (colour defaults)
 
