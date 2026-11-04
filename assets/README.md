@@ -5,16 +5,17 @@ design sources in [`./svg`](svg/). No preset uses an image, so every preset is
 sharp at any size and draws from the first frame. Each `<preset>-colour.svg` is the
 design source of that preset's shapes, drawn in a 200-unit box and scaled to the
 marker size; the geometry lives in `core/marker.cpp` (tested off-game) and the
-drawing in `src/entry.cpp`. Each `<preset>-outline.svg` is kept for reference
-only: the drawn outline is a fixed 2 px dark band beside the colour, not the
-design's scaled outline stroke. No game textures are bundled.
+drawing in `src/entry.cpp`. Radar Dash's outline is drawn from its
+`radar-dash-outline.svg`, scaled with the marker; the other presets'
+`<preset>-outline.svg` files are kept for reference only, their drawn outline
+being a fixed 2 px dark band beside the colour. No game textures are bundled.
 
 | Preset | Drawn by | Geometry | Shapes |
 |--------|----------|----------|--------|
 | Pulse Ring | `DrawPulseRing` | `pulse_ring_geometry` | a circle r 74, stroke 11 |
 | Corner Reticle | `DrawCornerReticle` | `corner_reticle_geometry`, `bracket_stroke_boundary` | four brackets, stroke 11 with round caps and a round outer corner (each filled as one mesh), and a dot r 5.5 |
 | Beacon Crosshair | `DrawBeaconCrosshair` | `beacon_crosshair_geometry` | four filled triangles and a dot r 5 |
-| Radar Dash | `DrawRadarDash` | `radar_dash_geometry`, `dash_stroke_boundary`, `flat_dash_arc`, `flat_dash_boundary`, `dash_arc_points` | a dashed circle r 72, stroke 11 with round caps (flat ends with the outline on), and a dot r 6 |
+| Radar Dash | `DrawRadarDash` | `radar_dash_geometry`, `dash_stroke_boundary` | a dashed circle r 72, stroke 11 with round caps (each dash filled as one mesh), and a dot r 6 |
 | Soft Halo | `DrawSoftHalo` | `soft_halo_geometry` | a disc r 96 whose alpha falls from 0.92 at the centre to 0.5 at 52 % of the radius and 0 at the edge |
 
 **Outlines.** The outline is drawn first, under the colour, in the outline
@@ -23,14 +24,14 @@ colour at 90 % of the marker's opacity:
 - Pulse Ring and Corner Reticle: the same shapes stroked 2 px wider on each side.
 - Beacon Crosshair: each triangle enlarged by 2 px on every side, its tip cut
   straight across 2 px past the colour tip.
-- Radar Dash: with the outline on, each dash has flat ends instead of round ones,
-  at the same visible length (each flat end sits where the round end reached).
-  Two 2 px arcs per dash, one along its outer edge and one along its inner edge,
-  span exactly that flat dash. They never cross the dash's ends and never lie
-  under the colour, so the gaps between dashes stay open at every size and the
-  dashes keep one even tone below full opacity. With the outline off, the ends
-  stay round.
-- Every centre dot: a dot 2 px larger.
+- Radar Dash: the design's outline layer, scaled with the marker like the
+  colour, not a fixed 2 px band: the same round-capped dashes at stroke 17 and a
+  dot r 9, so the outline reaches 3 units of the 200-unit design beyond the colour
+  all around each dash and the dot (about 0.6 px at size 40, 1.5 px at 100). Each
+  dash's outline is one mesh under the whole dash, so body and round ends keep
+  one even tone below full opacity, and the gaps between the outlines stay open
+  at every size. The dashes look the same with the outline on or off.
+- Every other centre dot: a dot 2 px larger.
 - Soft Halo has no outline.
 
 **Radar Dash's dashes are equal.** The design's dash pattern (26 on, 22 off) does

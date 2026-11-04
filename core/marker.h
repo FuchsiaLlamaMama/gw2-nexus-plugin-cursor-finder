@@ -34,9 +34,10 @@ struct MarkerPoint {
     float y = 0.0f;
 };
 
-// Width of the dark outline band around every preset drawn in code, on EACH side
+// Width of the dark outline band around the presets drawn in code, on EACH side
 // of the colour shape, in pixels. Fixed — it does not grow with the marker (the
-// design screens, not the exported outline assets, whose strokes scale). Outline
+// design screens, not the exported outline assets, whose strokes scale). The
+// Radar Dash is the exception: its outline scales (RadarDashGeometry). Outline
 // width (Thin / Medium / Thick) later changes only this value.
 constexpr float kMarkerOutlineBandPx = 2.0f;
 
@@ -142,45 +143,31 @@ struct DashArc {
     float end   = 0.0f;
 };
 
-// The Radar Dash drawn in code: 9 arcs on one circle and a centre dot. With the
-// outline off the arcs have round caps. With it on they have flat ends at the same
-// visible length (flat_dash_arc), and the outline is a 2 px arc along each dash's
-// outer and inner edge spanning exactly that (never across the ends, never under
-// the colour) and a dot 2 px larger, drawn under the colour. Pixels, screen space.
+// The Radar Dash drawn in code: 9 round-capped arcs on one circle and a centre dot.
+// The outline, drawn under the colour, is the design's outline layer: the same arcs
+// and dot, wider. Unlike the other presets' fixed 2 px band, it scales with the
+// marker, so the gaps between the dashes stay open at any size. Pixels, screen
+// space.
 struct RadarDashGeometry {
     MarkerPoint center;
     DashArc dashes[kRadarDashCount]; // the first starts at 3 o'clock
-    float radius               = 0.0f; // the dashes' centre line
-    float stroke               = 0.0f; // colour stroke, full width
-    float dot_radius           = 0.0f;
-    float outline_stroke       = 0.0f; // each outline arc's full width: kMarkerOutlineBandPx
-    float outline_outer_radius = 0.0f; // centre of the arc along the outer edge
-    float outline_inner_radius = 0.0f; // centre of the arc along the inner edge
-    float outline_dot_radius   = 0.0f; // dot_radius + kMarkerOutlineBandPx
+    float radius             = 0.0f; // the dashes' centre line
+    float stroke             = 0.0f; // colour stroke, full width
+    float dot_radius         = 0.0f;
+    float outline_stroke     = 0.0f; // outline stroke, full width, over the same arcs
+    float outline_dot_radius = 0.0f;
 };
 
 // The Radar Dash at marker size `size` centred on (center_x, center_y): the
 // design's ring (200-unit box; circle r 72, stroke 11, round caps, dot r 6;
-// assets/svg/radar-dash-colour.svg) scaled by size / 200, its dashes spread evenly
-// as above, plus the fixed outline band. A non-positive size yields all zeros
-// (nothing to draw).
+// assets/svg/radar-dash-colour.svg) and its outline (stroke 17, dot r 9;
+// assets/svg/radar-dash-outline.svg), scaled by size / 200, its dashes spread
+// evenly as above. A non-positive size yields all zeros (nothing to draw).
 RadarDashGeometry radar_dash_geometry(float center_x, float center_y, float size);
 
 // Segments along one dash body, and round one cap (a half circle).
 constexpr int kDashArcSteps = 16;
 constexpr int kDashCapSteps = 12;
-
-// Most points on one arc from dash_arc_points.
-constexpr int kDashArcMaxPoints = kDashArcSteps + 1;
-
-// Points along a circle of `radius` about `center` from arc.start to arc.end, both
-// ends included: an outline arc's centre line, stroked open (flat ends). Fixed
-// capacity, no heap. Empty (count 0) for a non-positive radius.
-struct DashArcPoints {
-    MarkerPoint points[kDashArcMaxPoints];
-    int count = 0;
-};
-DashArcPoints dash_arc_points(const MarkerPoint& center, float radius, const DashArc& arc);
 
 // Most points in one dash's stroke boundary: both long sides of the body and the
 // inside of both caps.
@@ -202,32 +189,11 @@ struct DashBoundary {
 // star-shaped from the middle of its centre line (fan_center), so it fills as one
 // triangle fan from there: one mesh, no seam where a cap meets the body, nothing
 // painted twice. That holds while the inner side stays in view of the fan point,
-// as it does for the Radar Dash at any size. Empty (count 0) for a non-positive
-// radius or stroke.
+// half the body less than acos((radius - stroke / 2) / radius): for the Radar
+// Dash's outline about 28.1 degrees against 10.8, at any size. Empty (count 0) for
+// a non-positive radius or stroke.
 DashBoundary dash_stroke_boundary(const MarkerPoint& center, float radius, float stroke,
                                   const DashArc& arc);
-
-// The span a dash covers when drawn with flat ends (with the outline on): its body
-// widened at both ends by the round cap's radius as an angle, stroke / 2 / radius,
-// so each flat end sits where the round end reached and the dash keeps its visible
-// length. The outline arcs span exactly this too. The dash unchanged for a
-// non-positive radius or stroke.
-DashArc flat_dash_arc(const DashArc& dash, float radius, float stroke);
-
-// The outer boundary of the arc `arc` on the circle of `radius` about `center`,
-// stroked at full width `stroke` with flat ends: the closed polygon the DLL fills,
-// wound clockwise on screen (y down). It runs along the outer side, straight in
-// along the end, back along the inner side and straight out along the start. Not
-// convex, but star-shaped from the middle of its centre line (fan_center), so it
-// fills as one triangle fan from there, nothing painted twice. That holds while
-// the inner side stays in view of the fan point, half the arc less than
-// acos((radius - stroke / 2) / radius): for the Radar Dash's flat dashes about
-// 15.2 degrees against 22.5, at any size. Each side is cut into up to
-// kDashArcSteps pieces, none shorter than a pixel, so the fill's soft edge does
-// not fold back at the square corners of a small dash. Empty (count 0) for a
-// non-positive radius or stroke.
-DashBoundary flat_dash_boundary(const MarkerPoint& center, float radius, float stroke,
-                                const DashArc& arc);
 
 // The Soft Halo's alpha stops, from the centre out.
 constexpr int kSoftHaloStops = 3;

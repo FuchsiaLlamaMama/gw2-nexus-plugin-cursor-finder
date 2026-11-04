@@ -515,18 +515,16 @@ void DrawBeaconCrosshair(ImDrawList* dl, const ImVec2& center, float size,
 }
 
 // The Radar Dash, drawn in code at marker size `size` (geometry from
-// cursor_finder::radar_dash_geometry). With the outline off: each dash a
-// round-capped arc filled as one mesh (cursor_finder::dash_stroke_boundary: no
-// seam where a cap meets the body, nothing painted twice), and the dot. With it
-// on, the dashes get flat ends instead: round tips beside dark-edged sides look
-// wrong in game. Each flat dash keeps the visible length of the round one
-// (cursor_finder::flat_dash_arc). The outline layer comes first: for each dash,
-// two 2 px arcs with flat ends along its outer and inner edge, spanning exactly
-// the flat dash, so they never cross its ends or lie under the colour (which
-// would show through below full opacity) and the gaps between dashes stay open;
-// then the outline dot. Then each flat dash filled as one mesh
-// (cursor_finder::flat_dash_boundary), and the dot. Used for the marker and its
-// style tile (colour only).
+// cursor_finder::radar_dash_geometry): each dash a round-capped arc filled as one
+// mesh (cursor_finder::dash_stroke_boundary: no seam where a cap meets the body,
+// nothing painted twice), and the dot. The outline layer comes first (when
+// `draw_outline`): each dash's outline is the same round-capped arc at the wider
+// outline stroke, one mesh each, then the outline dot. Unlike the other presets'
+// fixed 2 px band, this outline scales with the marker as in the design, so the
+// gaps between the dashes stay open at any size. Being one mesh under the whole
+// dash, it shows through the colour below full opacity evenly, body and caps alike.
+// Then the colour dashes and dot, the same with the outline on or off. Used for the
+// marker and its style tile (colour only).
 void DrawRadarDash(ImDrawList* dl, const ImVec2& center, float size,
                    ImU32 colour, bool draw_outline, ImU32 outline_colour)
 {
@@ -534,39 +532,21 @@ void DrawRadarDash(ImDrawList* dl, const ImVec2& center, float size,
         cursor_finder::radar_dash_geometry(center.x, center.y, size);
     if (g.stroke <= 0.0f || (colour & IM_COL32_A_MASK) == 0) { return; }
     const ImVec2 dot(g.center.x, g.center.y);
-    if (draw_outline)
-    {
-        const float radii[2] = {g.outline_outer_radius, g.outline_inner_radius};
+    auto fill_dashes = [&](float stroke, ImU32 col) {
         for (const cursor_finder::DashArc& dash : g.dashes)
         {
-            const cursor_finder::DashArc span =
-                cursor_finder::flat_dash_arc(dash, g.radius, g.stroke);
-            for (const float radius : radii)
-            {
-                const cursor_finder::DashArcPoints arc =
-                    cursor_finder::dash_arc_points(g.center, radius, span);
-                ImVec2 pts[cursor_finder::kDashArcMaxPoints];
-                for (int k = 0; k < arc.count; ++k)
-                {
-                    pts[k] = ImVec2(arc.points[k].x, arc.points[k].y);
-                }
-                // An open polyline: ImGui softens its sides only, its ends stay flat.
-                dl->AddPolyline(pts, arc.count, outline_colour, /*closed=*/false,
-                                g.outline_stroke);
-            }
+            const cursor_finder::DashBoundary boundary =
+                cursor_finder::dash_stroke_boundary(g.center, g.radius, stroke, dash);
+            AddStarPolyFilled(dl, ImVec2(boundary.fan_center.x, boundary.fan_center.y),
+                              boundary.points, boundary.count, col);
         }
+    };
+    if (draw_outline)
+    {
+        fill_dashes(g.outline_stroke, outline_colour);
         dl->AddCircleFilled(dot, g.outline_dot_radius, outline_colour, kDotSegments);
     }
-    for (const cursor_finder::DashArc& dash : g.dashes)
-    {
-        const cursor_finder::DashBoundary boundary = draw_outline
-            ? cursor_finder::flat_dash_boundary(
-                  g.center, g.radius, g.stroke,
-                  cursor_finder::flat_dash_arc(dash, g.radius, g.stroke))
-            : cursor_finder::dash_stroke_boundary(g.center, g.radius, g.stroke, dash);
-        AddStarPolyFilled(dl, ImVec2(boundary.fan_center.x, boundary.fan_center.y),
-                          boundary.points, boundary.count, colour);
-    }
+    fill_dashes(g.stroke, colour);
     dl->AddCircleFilled(dot, g.dot_radius, colour, kDotSegments);
 }
 

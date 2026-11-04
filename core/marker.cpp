@@ -247,12 +247,14 @@ RadarDashGeometry radar_dash_geometry(float center_x, float center_y, float size
 {
     if (size <= 0.0f) { return RadarDashGeometry{}; }
     // Design values in its 200-unit box: circle r 72, stroke 11, dash 26 on and 22
-    // off, dot r 6.
-    constexpr float kDesignRadius    = 72.0f;
-    constexpr float kDesignStroke    = 11.0f;
-    constexpr float kDesignDotRadius = 6.0f;
-    constexpr float kDashOn          = 26.0f;
-    constexpr float kDashOff         = 22.0f;
+    // off, dot r 6; the outline layer strokes the same circle at 17 with a dot r 9.
+    constexpr float kDesignRadius           = 72.0f;
+    constexpr float kDesignStroke           = 11.0f;
+    constexpr float kDesignDotRadius        = 6.0f;
+    constexpr float kDesignOutlineStroke    = 17.0f;
+    constexpr float kDesignOutlineDotRadius = 9.0f;
+    constexpr float kDashOn                 = 26.0f;
+    constexpr float kDashOff                = 22.0f;
     const float scale  = size / kDesignBox;
     const float period = 4.0f * kHalfPi / static_cast<float>(kRadarDashCount);
     const float dash   = period * kDashOn / (kDashOn + kDashOff);
@@ -266,25 +268,12 @@ RadarDashGeometry radar_dash_geometry(float center_x, float center_y, float size
     g.radius             = kDesignRadius * scale;
     g.stroke             = kDesignStroke * scale;
     g.dot_radius         = kDesignDotRadius * scale;
-    g.outline_stroke     = kMarkerOutlineBandPx;
-    // Each outline arc lies edge to edge with the colour: its centre is half its
-    // width beyond the colour's edge.
-    g.outline_outer_radius = g.radius + 0.5f * g.stroke + 0.5f * kMarkerOutlineBandPx;
-    g.outline_inner_radius = g.radius - 0.5f * g.stroke - 0.5f * kMarkerOutlineBandPx;
-    g.outline_dot_radius = g.dot_radius + kMarkerOutlineBandPx;
+    // The outline scales with the marker as in the design, not the fixed band the
+    // other presets use: a fixed 2 px band all round would close the gaps between
+    // the dashes at small sizes.
+    g.outline_stroke     = kDesignOutlineStroke * scale;
+    g.outline_dot_radius = kDesignOutlineDotRadius * scale;
     return g;
-}
-
-DashArcPoints dash_arc_points(const MarkerPoint& center, float radius, const DashArc& arc)
-{
-    DashArcPoints out;
-    if (radius <= 0.0f) { return out; }
-    for (int k = 0; k <= kDashArcSteps; ++k)
-    {
-        out.points[out.count++] =
-            on_circle(center, radius, step_angle(arc.start, arc.end, k, kDashArcSteps));
-    }
-    return out;
 }
 
 DashBoundary dash_stroke_boundary(const MarkerPoint& center, float radius, float stroke,
@@ -324,53 +313,6 @@ DashBoundary dash_stroke_boundary(const MarkerPoint& center, float radius, float
     {
         push(on_circle(start, h,
                        step_angle(arc.start + pi, arc.start + 2.0f * pi, k, kDashCapSteps)));
-    }
-    return out;
-}
-
-DashArc flat_dash_arc(const DashArc& dash, float radius, float stroke)
-{
-    if (radius <= 0.0f || stroke <= 0.0f) { return dash; }
-    const float cap = 0.5f * stroke / radius;
-    return DashArc{dash.start - cap, dash.end + cap};
-}
-
-// Both sides of a flat-ended dash fit in the round-capped dash's boundary.
-static_assert(2 * (kDashArcSteps + 1) <= kDashBoundaryMaxPoints,
-              "a flat-ended dash boundary must fit DashBoundary");
-
-DashBoundary flat_dash_boundary(const MarkerPoint& center, float radius, float stroke,
-                                const DashArc& arc)
-{
-    DashBoundary out;
-    if (radius <= 0.0f || stroke <= 0.0f) { return out; }
-    const float h = stroke * 0.5f;
-    // The fill's soft edge moves a square corner half a pixel along each side, so a
-    // piece shorter than that would fold back there and paint a spot twice. Cut each
-    // side into pieces whose chord on the shorter, inner side is at least a pixel
-    // (twice the fold point, on purpose, for headroom).
-    constexpr float kMinPiecePx = 1.0f;
-    const float inner = radius - h;
-    const float piece = inner > 0.5f * kMinPiecePx
-        ? 2.0f * std::asin(0.5f * kMinPiecePx / inner)
-        : arc.end - arc.start;
-    const int steps = piece > 0.0f
-        ? std::clamp(static_cast<int>((arc.end - arc.start) / piece), 1, kDashArcSteps)
-        : 1;
-    out.fan_center = on_circle(center, radius, 0.5f * (arc.start + arc.end));
-    // 1. The outer side, start to end, both corners included. The straight edge
-    //    from its last point to the next is the flat end.
-    for (int k = 0; k <= steps; ++k)
-    {
-        out.points[out.count++] =
-            on_circle(center, radius + h, step_angle(arc.start, arc.end, k, steps));
-    }
-    // 2. The inner side, end back to start, both corners included; the closing edge
-    //    back to the first point is the flat start.
-    for (int k = 0; k <= steps; ++k)
-    {
-        out.points[out.count++] =
-            on_circle(center, radius - h, step_angle(arc.end, arc.start, k, steps));
     }
     return out;
 }
