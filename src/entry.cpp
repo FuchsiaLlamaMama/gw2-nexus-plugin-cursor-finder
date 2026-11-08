@@ -1176,7 +1176,7 @@ void RenderPanel()
             }
         }
 
-        // The MARKER rows' label column: wide enough for the longest label in this
+        // The MARKER and DASHES rows' shared label column: wide enough for the longest label in this
         // font plus clearance before the slider, never under the design's 96. The
         // same with Radar Dash selected or not, so the rows stay put.
         float marker_label_w = 96.0f;
@@ -1185,30 +1185,6 @@ void RenderPanel()
             // (Not std::max: <Windows.h> defines a max macro here.)
             const float w = ImGui::CalcTextSize(label).x + 12.0f;
             if (w > marker_label_w) { marker_label_w = w; }
-        }
-
-        // Radar Dash only: its number of dashes and dash width (Cursor Settings
-        // v1.5). The values are kept while another style is selected.
-        if (s.preset == cursor_finder::Preset::RadarDash)
-        {
-            int dashes = s.dash_count;
-            if (SliderRow("Number of dashes", "##dash-count", &dashes,
-                          cursor_finder::kDashCountMin, cursor_finder::kDashCountMax, "%d",
-                          marker_label_w))
-            {
-                s.dash_count = cursor_finder::clamp_int(dashes, cursor_finder::kDashCountMin,
-                                                        cursor_finder::kDashCountMax);
-            }
-            // The slider runs over the 5 % steps (0-20), so its grab, its value and
-            // the drawn dash always agree, and keyboard or gamepad moves a step.
-            constexpr int kStep = cursor_finder::kDashWidthStep;
-            int step = cursor_finder::snap_dash_width(s.dash_width_pct) / kStep;
-            if (SliderRow("Dash width", "##dash-width", &step, cursor_finder::kDashWidthMin / kStep,
-                          cursor_finder::kDashWidthMax / kStep, "%d%%", marker_label_w, "Dots",
-                          kStep))
-            {
-                s.dash_width_pct = cursor_finder::snap_dash_width(step * kStep);
-            }
         }
 
         // Size and Opacity — ranges from the reference design, relaid as
@@ -1224,6 +1200,34 @@ void RenderPanel()
                       marker_label_w))
         {
             s.opacity_pct = cursor_finder::clamp_int(opacity, cursor_finder::kOpacityMin, cursor_finder::kOpacityMax);
+        }
+
+        // Radar Dash only: its number of dashes and dash width (Cursor Settings
+        // v1.5), after Opacity under their own DASHES head (owner, 2026-11-07).
+        // They share the MARKER label column, so all four sliders line up. The
+        // values are kept while another style is selected.
+        if (s.preset == cursor_finder::Preset::RadarDash)
+        {
+            ImGui::Separator();
+            SectionHead("DASHES");
+            int dashes = s.dash_count;
+            if (SliderRow("Number of dashes", "##dash-count", &dashes,
+                          cursor_finder::kDashCountMin, cursor_finder::kDashCountMax, "%d",
+                          marker_label_w))
+            {
+                s.dash_count = cursor_finder::clamp_int(dashes, cursor_finder::kDashCountMin,
+                                                        cursor_finder::kDashCountMax);
+            }
+            // The slider runs over the 5 % steps (0-20), so its grab, its value and
+            // the drawn dash always agree.
+            constexpr int kStep = cursor_finder::kDashWidthStep;
+            int step = cursor_finder::snap_dash_width(s.dash_width_pct) / kStep;
+            if (SliderRow("Dash width", "##dash-width", &step, cursor_finder::kDashWidthMin / kStep,
+                          cursor_finder::kDashWidthMax / kStep, "%d%%", marker_label_w, "Dots",
+                          kStep))
+            {
+                s.dash_width_pct = cursor_finder::snap_dash_width(step * kStep);
+            }
         }
 
         // Outline and Fill apply only to presets that support them — Soft Halo is a
