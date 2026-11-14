@@ -23,11 +23,14 @@
 
 #include <atomic>
 #include <cfloat>
+#include <cstdarg>
 #include <cstdint>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <initializer_list>
+#include <mutex>
+#include <vector>
 
 #include "imgui.h"
 #include "Nexus.h"
@@ -36,6 +39,7 @@
 #include "core/marker.h"
 #include "core/clip_freeze.h"
 #include "core/visibility.h"
+#include "core/pointer_picture.h"
 #include "mumble_link.h"
 #include "../assets/window_bg_data.h"
 #include "../assets/icon_data.h"
@@ -310,7 +314,7 @@ void EnsureQuickAccessIcon()
 // A layer tint: the layer's RGB at the overall marker alpha (opacity_pct).
 ImU32 LayerTint(const cursor_finder::Rgb& c, int opacity_pct)
 {
-    const int a = 255 * cursor_finder::clamp_int(opacity_pct, 0, 100) / 100;
+    const int a = cursor_finder::layer_alpha(opacity_pct);
     return IM_COL32(c.r, c.g, c.b, a);
 }
 
@@ -318,7 +322,7 @@ ImU32 LayerTint(const cursor_finder::Rgb& c, int opacity_pct)
 // the alpha the Pulse Ring's outline mask carried (svg/pulse-ring-outline.svg).
 ImU32 OutlineTint(const cursor_finder::Rgb& c, int opacity_pct)
 {
-    const int a = 255 * cursor_finder::clamp_int(opacity_pct, 0, 100) / 100 * 9 / 10;
+    const int a = cursor_finder::outline_alpha(opacity_pct);
     return IM_COL32(c.r, c.g, c.b, a);
 }
 
@@ -326,9 +330,7 @@ ImU32 OutlineTint(const cursor_finder::Rgb& c, int opacity_pct)
 // so the Opacity control fades the whole marker uniformly.
 ImU32 FillTint(const cursor_finder::Rgb& c, int fill_opacity_pct, int opacity_pct)
 {
-    const int a = 255
-        * cursor_finder::clamp_int(fill_opacity_pct, 0, 100) / 100
-        * cursor_finder::clamp_int(opacity_pct, 0, 100) / 100;
+    const int a = cursor_finder::fill_alpha(fill_opacity_pct, opacity_pct);
     return IM_COL32(c.r, c.g, c.b, a);
 }
 
@@ -855,6 +857,485 @@ void DrawPreviewGround(ImDrawList* dl, const ImVec2& p_min, const ImVec2& p_max,
             break;
     }
 }
+
+// ============================================================================
+// SPIKE 004-21 (throwaway probe, never released): the marker on the system
+// pointer. With the test toggle on and the Radar Dash selected, the game's
+// current pointer is replaced by the same pointer with the marker drawn around
+// it (cursor-finder-core's pointer_picture), so the system draws both together.
+// The render thread builds the combined pointers (it has the settings); the
+// game window's thread re-applies them from the WndProc callback, after the game
+// has handled WM_SETCURSOR. Everything here is runtime-only; nothing is saved.
+// ============================================================================
+namespace spike {
+
+// Private messages posted to the game window. wParam on kMsgApply: 1 = posted
+// after a WM_SETCURSOR, 0 = the render thread's once-per-frame fallback.
+constexpr UINT kMsgApply   = WM_APP + 0x2104;
+constexpr UINT kMsgRestore = WM_APP + 0x2105;
+constexpr std::size_t kCacheMax = 32;
+constexpr std::size_t kFailedMax = 64;
+
+bool g_Toggle = false; // the panel checkbox; render thread only; not saved
+
+std::atomic<bool> g_Active{false};      // re-applying allowed (window thread reads)
+std::atomic<HWND> g_GameWnd{nullptr};   // stored from the WndProc callback
+
+// Counts for the 5 s log line (window thread increments, render thread drains).
+std::atomic<unsigned> g_SetCursorMsgs{0};
+std::atomic<unsigned> g_ReapplyAfterSetCursor{0};
+std::atomic<unsigned> g_ReapplyFromFrame{0};
+
+struct Entry {
+    HCURSOR       game     = nullptr;
+    std::uint64_t key      = 0;
+    HCURSOR       combined = nullptr;
+};
+
+// Guarded by g_Mutex: the cache (oldest first), the combined pointers waiting to
+// be destroyed, the settings key in use and the last game pointer seen.
+std::mutex           g_Mutex;
+std::vector<Entry>   g_Cache;
+std::vector<HCURSOR> g_Retired;
+std::uint64_t        g_CurrentKey = 0;
+HCURSOR              g_LastGame   = nullptr;
+
+// Render thread only.
+std::vector<HCURSOR> g_Failed;          // game pointers that could not be used
+std::vector<HCURSOR> g_Seen;            // game pointers already logged
+bool                 g_LoggedScreen = false;
+ULONGLONG            g_LastCountLog = 0;
+
+void Log(const char* fmt, ...)
+{
+    if (!g_API || !g_API->Log) { return; }
+    char msg[256];
+    va_list args;
+    va_start(args, fmt);
+    std::vsnprintf(msg, sizeof(msg), fmt, args);
+    va_end(args);
+    g_API->Log(LOGL_INFO, "Cursor Finder", msg);
+}
+
+bool Contains(const std::vector<HCURSOR>& v, HCURSOR h)
+{
+    for (HCURSOR x : v) { if (x == h) { return true; } }
+    return false;
+}
+
+// Caller holds g_Mutex.
+bool IsOursLocked(HCURSOR h)
+{
+    if (!h) { return false; }
+    for (const Entry& e : g_Cache) { if (e.combined == h) { return true; } }
+    return Contains(g_Retired, h);
+}
+
+// Caller holds g_Mutex.
+HCURSOR FindLocked(HCURSOR game, std::uint64_t key)
+{
+    for (const Entry& e : g_Cache)
+    {
+        if (e.game == game && e.key == key) { return e.combined; }
+    }
+    return nullptr;
+}
+
+// The settings the picture depends on, as one number (FNV-1a).
+std::uint64_t SettingsKey(const cursor_finder::CursorSettings& s)
+{
+    std::uint64_t h = 1469598103934665603ull;
+    auto mix = [&h](int v) {
+        h ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(v));
+        h *= 1099511628211ull;
+    };
+    mix(s.size_px); mix(s.opacity_pct);
+    mix(s.colour.r); mix(s.colour.g); mix(s.colour.b);
+    mix(s.outline ? 1 : 0);
+    mix(s.outline_colour.r); mix(s.outline_colour.g); mix(s.outline_colour.b);
+    mix(s.fill ? 1 : 0);
+    mix(s.fill_colour.r); mix(s.fill_colour.g); mix(s.fill_colour.b);
+    mix(s.fill_opacity_pct); mix(s.fill_size_pct);
+    mix(s.dash_count); mix(s.dash_width_pct);
+    return h;
+}
+
+// Read a game pointer's picture: 32-bit pixels from its colour bitmap; alpha from
+// the mask when the colour has none. A monochrome pointer (no colour bitmap) is
+// refused. Both bitmaps GetIconInfo returns are deleted here.
+bool ReadGamePointer(HCURSOR h, cursor_finder::PointerImage& out)
+{
+    ICONINFO ii{};
+    if (!::GetIconInfo(h, &ii))
+    {
+        Log("spike: GetIconInfo failed for pointer %p (error %lu)",
+            static_cast<void*>(h), ::GetLastError());
+        return false;
+    }
+    struct BitmapGuard {
+        ICONINFO& ii;
+        ~BitmapGuard()
+        {
+            if (ii.hbmColor) { ::DeleteObject(ii.hbmColor); }
+            if (ii.hbmMask)  { ::DeleteObject(ii.hbmMask); }
+        }
+    } guard{ii};
+
+    if (!ii.hbmColor)
+    {
+        Log("spike: pointer %p is monochrome (no colour bitmap); left alone",
+            static_cast<void*>(h));
+        return false;
+    }
+    BITMAP bm{};
+    if (!::GetObject(ii.hbmColor, static_cast<int>(sizeof(bm)), &bm) || bm.bmWidth <= 0 || bm.bmHeight <= 0)
+    {
+        Log("spike: GetObject failed for pointer %p", static_cast<void*>(h));
+        return false;
+    }
+    const int w = bm.bmWidth;
+    const int ht = bm.bmHeight;
+
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth       = w;
+    bi.bmiHeader.biHeight      = -ht; // top-down
+    bi.bmiHeader.biPlanes      = 1;
+    bi.bmiHeader.biBitCount    = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+
+    std::vector<std::uint8_t> bgra(static_cast<std::size_t>(w) * ht * 4, 0);
+    std::vector<std::uint8_t> mask;
+    HDC dc = ::GetDC(nullptr);
+    const int rows = ::GetDIBits(dc, ii.hbmColor, 0, static_cast<UINT>(ht), bgra.data(), &bi,
+                                 DIB_RGB_COLORS);
+    bool has_alpha = false;
+    if (rows == ht && bm.bmBitsPixel == 32)
+    {
+        for (std::size_t i = 3; i < bgra.size(); i += 4)
+        {
+            if (bgra[i] != 0) { has_alpha = true; break; }
+        }
+    }
+    bool mask_ok = false;
+    if (rows == ht && !has_alpha && ii.hbmMask)
+    {
+        BITMAPINFO mi = bi; // same size: a colour pointer's mask is the AND mask only
+        mask.assign(bgra.size(), 0);
+        mask_ok = ::GetDIBits(dc, ii.hbmMask, 0, static_cast<UINT>(ht), mask.data(), &mi,
+                              DIB_RGB_COLORS) == ht;
+    }
+    ::ReleaseDC(nullptr, dc);
+    if (rows != ht)
+    {
+        Log("spike: GetDIBits failed for pointer %p (%d of %d rows)",
+            static_cast<void*>(h), rows, ht);
+        return false;
+    }
+    if (!has_alpha && !mask_ok)
+    {
+        Log("spike: pointer %p has no alpha and its mask could not be read",
+            static_cast<void*>(h));
+        return false;
+    }
+
+    out.image.width  = w;
+    out.image.height = ht;
+    out.image.rgba.assign(bgra.size(), 0);
+    for (std::size_t i = 0; i < bgra.size(); i += 4)
+    {
+        out.image.rgba[i]     = bgra[i + 2];
+        out.image.rgba[i + 1] = bgra[i + 1];
+        out.image.rgba[i + 2] = bgra[i];
+        // Mask: black (0) = opaque pointer pixel, white = transparent. Known
+        // limit: "invert the screen" pixels (white mask) come out transparent.
+        out.image.rgba[i + 3] = has_alpha ? bgra[i + 3] : (mask[i] == 0 ? 255 : 0);
+    }
+    out.hotspot_x = static_cast<int>(ii.xHotspot);
+    out.hotspot_y = static_cast<int>(ii.yHotspot);
+
+    if (!Contains(g_Seen, h))
+    {
+        g_Seen.push_back(h);
+        Log("spike: game pointer %p: %dx%d, %d bpp, hotspot (%d, %d), alpha from %s",
+            static_cast<void*>(h), w, ht, static_cast<int>(bm.bmBitsPixel), out.hotspot_x,
+            out.hotspot_y, has_alpha ? "colour" : "mask");
+    }
+    return true;
+}
+
+// Turn a combined picture into a pointer: colour = a 32-bit top-down DIB section
+// with straight alpha, mask = an all-zero 1-bit bitmap, hotspot at the centre.
+HCURSOR MakeCursor(const cursor_finder::CombinedPointer& c)
+{
+    const int side = c.image.width;
+    if (side <= 0) { return nullptr; }
+    BITMAPV5HEADER bh{};
+    bh.bV5Size        = sizeof(BITMAPV5HEADER);
+    bh.bV5Width       = side;
+    bh.bV5Height      = -side; // top-down
+    bh.bV5Planes      = 1;
+    bh.bV5BitCount    = 32;
+    bh.bV5Compression = BI_BITFIELDS;
+    bh.bV5RedMask     = 0x00FF0000;
+    bh.bV5GreenMask   = 0x0000FF00;
+    bh.bV5BlueMask    = 0x000000FF;
+    bh.bV5AlphaMask   = 0xFF000000;
+
+    void* bits = nullptr;
+    HDC dc = ::GetDC(nullptr);
+    HBITMAP colour = ::CreateDIBSection(dc, reinterpret_cast<BITMAPINFO*>(&bh), DIB_RGB_COLORS,
+                                        &bits, nullptr, 0);
+    ::ReleaseDC(nullptr, dc);
+    if (!colour || !bits)
+    {
+        Log("spike: CreateDIBSection failed (%dx%d)", side, side);
+        if (colour) { ::DeleteObject(colour); }
+        return nullptr;
+    }
+    std::uint8_t* dst = static_cast<std::uint8_t*>(bits);
+    const std::size_t n = static_cast<std::size_t>(side) * side;
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        dst[i * 4]     = c.image.rgba[i * 4 + 2];
+        dst[i * 4 + 1] = c.image.rgba[i * 4 + 1];
+        dst[i * 4 + 2] = c.image.rgba[i * 4];
+        dst[i * 4 + 3] = c.image.rgba[i * 4 + 3];
+    }
+    ::GdiFlush();
+
+    // 1-bit rows are padded to 16 bits.
+    const std::size_t stride = static_cast<std::size_t>((side + 15) / 16) * 2;
+    std::vector<std::uint8_t> zeros(stride * static_cast<std::size_t>(side), 0);
+    HBITMAP mask = ::CreateBitmap(side, side, 1, 1, zeros.data());
+    if (!mask)
+    {
+        Log("spike: CreateBitmap (mask) failed (%dx%d)", side, side);
+        ::DeleteObject(colour);
+        return nullptr;
+    }
+
+    ICONINFO ii{};
+    ii.fIcon    = FALSE; // a pointer
+    ii.xHotspot = static_cast<DWORD>(c.hotspot_x);
+    ii.yHotspot = static_cast<DWORD>(c.hotspot_y);
+    ii.hbmMask  = mask;
+    ii.hbmColor = colour;
+    HCURSOR cur = reinterpret_cast<HCURSOR>(::CreateIconIndirect(&ii));
+    if (!cur) { Log("spike: CreateIconIndirect failed (error %lu)", ::GetLastError()); }
+    ::DeleteObject(colour); // CreateIconIndirect copies the bitmaps
+    ::DeleteObject(mask);
+    return cur;
+}
+
+// Destroy the retired combined pointers that are not on screen. Caller holds
+// g_Mutex; `shown` is the pointer on screen now.
+void DestroyRetiredLocked(HCURSOR shown)
+{
+    std::size_t keep = 0;
+    for (std::size_t i = 0; i < g_Retired.size(); ++i)
+    {
+        if (g_Retired[i] == shown) { g_Retired[keep++] = g_Retired[i]; continue; }
+        ::DestroyCursor(g_Retired[i]);
+    }
+    g_Retired.resize(keep);
+}
+
+HCURSOR ShownPointer()
+{
+    CURSORINFO ci{}; ci.cbSize = sizeof(ci);
+    return ::GetCursorInfo(&ci) ? ci.hCursor : nullptr;
+}
+
+void LogScreenOnce()
+{
+    HWND w = g_GameWnd.load();
+    if (g_LoggedScreen || !w) { return; }
+    g_LoggedScreen = true;
+    RECT rc{};
+    ::GetClientRect(w, &rc);
+    const ImVec2 d = ImGui::GetIO().DisplaySize;
+    Log("spike: screen %dx%d px, game window client %ldx%ld px, ImGui display %.0fx%.0f, "
+        "SM_CXCURSOR %d, SM_CYCURSOR %d",
+        ::GetSystemMetrics(SM_CXSCREEN), ::GetSystemMetrics(SM_CYSCREEN),
+        rc.right - rc.left, rc.bottom - rc.top, d.x, d.y,
+        ::GetSystemMetrics(SM_CXCURSOR), ::GetSystemMetrics(SM_CYCURSOR));
+}
+
+// Render thread, every frame. `want`: the toggle is on, the Radar Dash is
+// selected and the marker would show now.
+void Frame(const cursor_finder::CursorSettings& s, bool want)
+{
+    HWND wnd = g_GameWnd.load();
+
+    // The pointer on screen is read under g_Mutex: the window thread's SetCursor
+    // runs under the same lock, so a pointer it puts up cannot be destroyed as
+    // retired in between.
+    if (!want)
+    {
+        if (g_Active.exchange(false) && wnd) { ::PostMessage(wnd, kMsgRestore, 0, 0); }
+        std::lock_guard<std::mutex> lock(g_Mutex);
+        DestroyRetiredLocked(ShownPointer());
+        return;
+    }
+
+    LogScreenOnce();
+    const std::uint64_t key = SettingsKey(s);
+    HCURSOR game = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_Mutex);
+        const HCURSOR shown = ShownPointer();
+        if (key != g_CurrentKey)
+        {
+            // New settings: every cached picture is stale.
+            for (const Entry& e : g_Cache) { g_Retired.push_back(e.combined); }
+            g_Cache.clear();
+            g_CurrentKey = key;
+        }
+        // The game pointer to build for: the one on screen, or, while a stale
+        // combined pointer (retired) is still on screen, the last game pointer.
+        HCURSOR candidate = nullptr;
+        if (shown && !IsOursLocked(shown)) { g_LastGame = shown; candidate = shown; }
+        else if (shown && Contains(g_Retired, shown)) { candidate = g_LastGame; }
+        if (candidate && !FindLocked(candidate, key)) { game = candidate; }
+        DestroyRetiredLocked(shown);
+    }
+    g_Active.store(true);
+
+    if (game && !Contains(g_Failed, game))
+    {
+        cursor_finder::PointerImage img;
+        HCURSOR combined = nullptr;
+        if (ReadGamePointer(game, img))
+        {
+            const cursor_finder::CombinedPointer c =
+                cursor_finder::combine_pointer_with_radar_dash(s, img);
+            combined = MakeCursor(c);
+            Log("spike: combined picture for %p: %dx%d, hotspot (%d, %d)%s%s",
+                static_cast<void*>(game), c.image.width, c.image.height, c.hotspot_x,
+                c.hotspot_y, c.capped ? ", CAPPED at 256 (marker or pointer cut)" : "",
+                combined ? "" : ", FAILED to make a pointer");
+        }
+        if (combined)
+        {
+            std::lock_guard<std::mutex> lock(g_Mutex);
+            g_Cache.push_back(Entry{game, key, combined});
+            if (g_Cache.size() > kCacheMax)
+            {
+                g_Retired.push_back(g_Cache.front().combined);
+                Log("spike: cache over %u entries; oldest (game pointer %p) dropped",
+                    static_cast<unsigned>(kCacheMax), static_cast<void*>(g_Cache.front().game));
+                g_Cache.erase(g_Cache.begin());
+            }
+        }
+        else
+        {
+            if (g_Failed.size() >= kFailedMax) { g_Failed.clear(); }
+            g_Failed.push_back(game);
+        }
+    }
+
+    // Fallback for pointer changes that come without WM_SETCURSOR.
+    if (wnd) { ::PostMessage(wnd, kMsgApply, 0, 0); }
+
+    const ULONGLONG now = ::GetTickCount64();
+    if (g_LastCountLog == 0) { g_LastCountLog = now; }
+    if (now - g_LastCountLog >= 5000)
+    {
+        g_LastCountLog = now;
+        std::size_t cached = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_Mutex);
+            cached = g_Cache.size();
+        }
+        Log("spike: last 5 s: WM_SETCURSOR %u, re-applies after WM_SETCURSOR %u, "
+            "re-applies from the frame fallback %u, cached pointers %u",
+            g_SetCursorMsgs.exchange(0), g_ReapplyAfterSetCursor.exchange(0),
+            g_ReapplyFromFrame.exchange(0), static_cast<unsigned>(cached));
+    }
+}
+
+// The game window's thread, from the WndProc callback. Never consumes a message.
+void OnMessage(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    if (uMsg == WM_SETCURSOR)
+    {
+        if (LOWORD(lParam) == HTCLIENT && g_Active.load())
+        {
+            g_SetCursorMsgs.fetch_add(1);
+            ::PostMessage(hWnd, kMsgApply, 1, 0);
+        }
+        return;
+    }
+    if (uMsg == kMsgApply)
+    {
+        if (!g_Active.load()) { return; }
+        const HCURSOR cur = ::GetCursor(); // the game's choice, on its own thread
+        if (!cur) { return; }
+        std::lock_guard<std::mutex> lock(g_Mutex);
+        HCURSOR base = cur;
+        if (Contains(g_Retired, cur)) { base = g_LastGame; }  // stale picture: replace
+        else if (IsOursLocked(cur)) { return; }               // the game did not reset it
+        else { g_LastGame = cur; }
+        if (!base) { return; }
+        if (HCURSOR combined = FindLocked(base, g_CurrentKey))
+        {
+            ::SetCursor(combined);
+            (wParam == 1 ? g_ReapplyAfterSetCursor : g_ReapplyFromFrame).fetch_add(1);
+        }
+        return;
+    }
+    if (uMsg == kMsgRestore)
+    {
+        std::lock_guard<std::mutex> lock(g_Mutex);
+        if (g_LastGame && IsOursLocked(::GetCursor())) { ::SetCursor(g_LastGame); }
+    }
+}
+
+// Unload: restore the game's pointer on its own thread (bounded wait), before the
+// WndProc callback goes away. The combined pointers are destroyed afterwards
+// (Destroy), never the one still on screen.
+void RestoreForUnload()
+{
+    g_Active.store(false);
+    HWND wnd = g_GameWnd.load();
+    if (!wnd) { return; }
+    {
+        // Test never turned on: nothing of ours can be on screen.
+        std::lock_guard<std::mutex> lock(g_Mutex);
+        if (g_Cache.empty() && g_Retired.empty()) { return; }
+    }
+    DWORD_PTR result = 0;
+    if (!::SendMessageTimeout(wnd, kMsgRestore, 0, 0, SMTO_ABORTIFHUNG, 100, &result))
+    {
+        Log("spike: restore on unload timed out or failed (error %lu)", ::GetLastError());
+    }
+}
+
+void Destroy()
+{
+    const HCURSOR shown = ShownPointer();
+    std::lock_guard<std::mutex> lock(g_Mutex);
+    for (const Entry& e : g_Cache) { g_Retired.push_back(e.combined); }
+    g_Cache.clear();
+    DestroyRetiredLocked(shown);
+    if (!g_Retired.empty())
+    {
+        Log("spike: %u combined pointer(s) still on screen at unload; not destroyed",
+            static_cast<unsigned>(g_Retired.size()));
+        g_Retired.clear();
+    }
+    g_CurrentKey = 0;
+    g_LastGame = nullptr;
+    g_Failed.clear();
+    g_Seen.clear();
+    g_LoggedScreen = false;
+    g_LastCountLog = 0;
+    g_Toggle = false;
+}
+
+} // namespace spike
+// ============================ end SPIKE 004-21 ==============================
 
 // The settings panel body. Each control edits a working copy and
 // writes it through cursor-finder-core on change, so durability never depends on Unload
@@ -1409,6 +1890,10 @@ void RenderPanel()
                                static_cast<int>(cursor_finder::InCombatMode::Never));
             s.in_combat_mode = static_cast<cursor_finder::InCombatMode>(ic);
         }
+
+        // SPIKE 004-21: runtime-only test toggle (not saved).
+        ImGui::Spacing();
+        ImGui::Checkbox("Test: marker on the pointer (Radar Dash)", &spike::g_Toggle);
     }
     ImGui::EndChild();
 
@@ -1598,8 +2083,12 @@ void ApplyClip(bool want_clip)
 // global and safe to call from this thread) AND flag the render thread to reset
 // the state machine so we re-arm cleanly on return. Returns uMsg unchanged so the
 // message is never consumed — we only observe, never swallow game input.
-UINT OnWndProc(HWND /*hWnd*/, UINT uMsg, WPARAM wParam, LPARAM /*lParam*/)
+UINT OnWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
+    // SPIKE 004-21: remember the game window; re-apply the combined pointer.
+    if (hWnd) { spike::g_GameWnd.store(hWnd); }
+    spike::OnMessage(hWnd, uMsg, wParam, lParam);
+
     bool lost = false;
     switch (uMsg)
     {
@@ -1694,12 +2183,23 @@ void AddonRender()
             // below them ("Show over Nexus windows").
             ImDrawList* dl = s.draw_above_windows ? ImGui::GetForegroundDrawList()
                                                   : ImGui::GetBackgroundDrawList();
-            if (cursor_finder::should_show_marker(s, in_gameplay, in_combat, moving, g_PanelOpen))
+            const bool show =
+                cursor_finder::should_show_marker(s, in_gameplay, in_combat, moving, g_PanelOpen);
+            // SPIKE 004-21: with the test on and the Radar Dash selected, the
+            // marker rides on the system pointer instead of the in-game draw.
+            const bool on_pointer =
+                spike::g_Toggle && s.preset == cursor_finder::Preset::RadarDash;
+            spike::Frame(s, on_pointer && show);
+            if (show && !on_pointer)
             {
                 DrawMarker(dl, center, s);
             }
         }
-        else if (g_ClipActive || g_Clip.frozen())
+        else
+        {
+            spike::Frame(s, false); // SPIKE 004-21: finder off -> game pointer back
+        }
+        if (!s.enabled && (g_ClipActive || g_Clip.frozen()))
         {
             // Finder switched off while frozen: never leave the pointer pinned.
             g_Clip.reset();
@@ -1973,7 +2473,11 @@ void AddonUnload()
         if (g_API->GUI_Deregister)        { g_API->GUI_Deregister(AddonRender); }
         if (g_API->GUI_Deregister)        { g_API->GUI_Deregister(AddonOptions); }
         if (g_API->InputBinds_Deregister) { g_API->InputBinds_Deregister(kKeybindId); }
+        // SPIKE 004-21: the game's pointer back on its own thread, before the
+        // WndProc callback goes away; the combined pointers are destroyed after.
+        spike::RestoreForUnload();
         if (g_API->WndProc_Deregister)    { g_API->WndProc_Deregister(OnWndProc); }
+        spike::Destroy();
         if (g_API->QuickAccess_Remove)    { g_API->QuickAccess_Remove(kQuickAccessId); }
     }
     // Reset so a reload re-registers the button once the icon re-resolves

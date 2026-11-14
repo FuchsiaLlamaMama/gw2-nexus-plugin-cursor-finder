@@ -64,6 +64,7 @@ add_library(cursor-finder-core STATIC
   core/marker.cpp
   core/clip_freeze.cpp
   core/visibility.cpp
+  core/pointer_picture.cpp
 )
 target_include_directories(cursor-finder-core PUBLIC .)
 target_compile_features(cursor-finder-core PUBLIC cxx_std_17)

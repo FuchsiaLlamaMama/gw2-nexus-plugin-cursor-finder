@@ -3,7 +3,7 @@
 #
 # Hand-compiles the same sources CMakeLists builds for `cursor-finder-core-tests` and
 # runs them, exiting 0 (all green) / non-zero (red). It mirrors the CMake recipe:
-#   cursor-finder-core  = core/{cursor_finder_store,marker,clip_freeze,visibility}.cpp
+#   cursor-finder-core  = core/{cursor_finder_store,marker,clip_freeze,visibility,pointer_picture}.cpp
 #   shared-core  = persistence/atomic_file.cpp
 #   test driver  = tests/test_cursor_finder_core.cpp   (doctest, WITH_MAIN)
 #
@@ -47,6 +47,7 @@ xcrun clang++ -std=c++17 -O0 -g \
   "$cursor/core/marker.cpp" \
   "$cursor/core/clip_freeze.cpp" \
   "$cursor/core/visibility.cpp" \
+  "$cursor/core/pointer_picture.cpp" \
   "$deps/shared/persistence/atomic_file.cpp" \
   -o "$out"
 

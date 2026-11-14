@@ -28,6 +28,7 @@
 #include "core/marker.h"
 #include "core/clip_freeze.h"
 #include "core/visibility.h"
+#include "core/pointer_picture.h"
 #include "persistence/atomic_file.h"
 #include "theme/theme.h"
 
@@ -2209,4 +2210,190 @@ TEST_CASE("a root with a trailing separator still finds and moves the legacy fil
     CHECK(cursor_finder::resolve_settings_path(next, legacy) == next);
     CHECK(read_disk(t.root / "cursor-finder" / "cursor-finder.json") == "{\"legacy\":true}");
     CHECK_FALSE(fs::exists(t.root / "cursor"));
+}
+
+// --- spike 004-21: the Radar Dash as a picture, the pointer composited over it ---
+
+namespace {
+
+// A Radar Dash at size 100 (ring radius 36, colour stroke 5.5, dot r 3, outline
+// stroke 8.5, outline dot r 4.5): four round dots (width 0) at 12, 3, 6 and 9
+// o'clock, fully opaque, outline and fill off.
+cursor_finder::CursorSettings dash_settings()
+{
+    cursor_finder::CursorSettings s;
+    s.preset = cursor_finder::Preset::RadarDash;
+    s.colour = cursor_finder::Rgb{200, 100, 50};
+    s.size_px = 100;
+    s.opacity_pct = 100;
+    s.outline = false;
+    s.outline_colour = cursor_finder::Rgb{10, 20, 30};
+    s.fill = false;
+    s.fill_colour = cursor_finder::Rgb{240, 240, 250};
+    s.fill_opacity_pct = 35;
+    s.fill_size_pct = 70;
+    s.dash_count = 4;
+    s.dash_width_pct = 0;
+    return s;
+}
+
+struct Px { int r, g, b, a; };
+
+Px pixel_at(const cursor_finder::StraightImage& img, int x, int y)
+{
+    const std::size_t i = (static_cast<std::size_t>(y) * img.width + x) * 4;
+    return Px{img.rgba[i], img.rgba[i + 1], img.rgba[i + 2], img.rgba[i + 3]};
+}
+
+cursor_finder::StraightImage dash_picture(const cursor_finder::CursorSettings& s)
+{
+    return cursor_finder::to_straight(cursor_finder::paint_radar_dash(s, 100));
+}
+
+} // namespace
+
+TEST_CASE("pointer picture: the layer alphas match the DLL's tint arithmetic")
+{
+    CHECK(cursor_finder::layer_alpha(100) == 255);
+    CHECK(cursor_finder::layer_alpha(90) == 229);
+    CHECK(cursor_finder::outline_alpha(90) == 206);
+    CHECK(cursor_finder::fill_alpha(35, 100) == 89);
+    CHECK(cursor_finder::fill_alpha(35, 90) == 80);
+}
+
+TEST_CASE("pointer picture: the centre dot has the colour at the layer alpha")
+{
+    const auto img = dash_picture(dash_settings());
+    REQUIRE(img.width == 100);
+    REQUIRE(img.height == 100);
+    for (int xy : {49, 50})
+    {
+        const Px p = pixel_at(img, xy, xy);
+        CHECK(p.r == 200); CHECK(p.g == 100); CHECK(p.b == 50); CHECK(p.a == 255);
+    }
+}
+
+TEST_CASE("pointer picture: opacity scales the alpha, not the colour")
+{
+    auto s = dash_settings();
+    s.opacity_pct = 50;
+    const Px p = pixel_at(dash_picture(s), 50, 50);
+    CHECK(p.a == cursor_finder::layer_alpha(50));
+    CHECK(p.r == 200); CHECK(p.g == 100); CHECK(p.b == 50);
+}
+
+TEST_CASE("pointer picture: a gap between the dashes is transparent")
+{
+    // On the ring at 45 degrees between the 12 and 3 o'clock dots.
+    CHECK(pixel_at(dash_picture(dash_settings()), 75, 24).a == 0);
+    auto s = dash_settings();
+    s.outline = true;
+    CHECK(pixel_at(dash_picture(s), 75, 24).a == 0);
+}
+
+TEST_CASE("pointer picture: the outline shows just outside a dash, the colour inside")
+{
+    auto s = dash_settings();
+    s.outline = true;
+    const auto img = dash_picture(s);
+    // The 12 o'clock dot is centred at (50, 14): colour r 2.75, outline r 4.25.
+    const Px band = pixel_at(img, 50, 10);
+    CHECK(band.r == 10); CHECK(band.g == 20); CHECK(band.b == 30);
+    CHECK(band.a == cursor_finder::outline_alpha(100));
+    const Px core = pixel_at(img, 50, 13);
+    CHECK(core.r == 200); CHECK(core.g == 100); CHECK(core.b == 50); CHECK(core.a == 255);
+    // With the outline off, that band pixel is empty.
+    CHECK(pixel_at(dash_picture(dash_settings()), 50, 10).a == 0);
+}
+
+TEST_CASE("pointer picture: the fill disc shows only when the fill is on")
+{
+    // Fill radius 100 x 0.35 x 0.70 = 24.5; (50, 65) is about 15.5 from the centre.
+    CHECK(pixel_at(dash_picture(dash_settings()), 50, 65).a == 0);
+    auto s = dash_settings();
+    s.fill = true;
+    const Px p = pixel_at(dash_picture(s), 50, 65);
+    CHECK(p.r == 240); CHECK(p.g == 240); CHECK(p.b == 250);
+    CHECK(p.a == cursor_finder::fill_alpha(35, 100));
+}
+
+TEST_CASE("pointer picture: an edge pixel is partly covered (soft edges)")
+{
+    // The centre dot's edge (r 3 about (50, 50)) crosses pixel (52, 50).
+    const Px p = pixel_at(dash_picture(dash_settings()), 52, 50);
+    CHECK(p.a > 0);
+    CHECK(p.a < 255);
+    CHECK(p.r == 200);
+}
+
+TEST_CASE("pointer picture: straight alpha round-trips through the premultiplied canvas")
+{
+    cursor_finder::PremulCanvas c;
+    c.width = 1; c.height = 1;
+    c.px = {0.5f * (100.0f / 255.0f), 0.5f * (200.0f / 255.0f), 0.0f, 0.5f};
+    const auto img = cursor_finder::to_straight(c);
+    const Px p = pixel_at(img, 0, 0);
+    CHECK(p.r == 100); CHECK(p.g == 200); CHECK(p.b == 0); CHECK(p.a == 128);
+}
+
+TEST_CASE("pointer picture: the reach covers the outline at its largest")
+{
+    // Ring radius 36 + outline stroke 8.5 / 2 = 40.25 -> 41.
+    CHECK(cursor_finder::radar_dash_reach(dash_settings()) == 41);
+}
+
+TEST_CASE("pointer picture: the combined picture puts the hotspot at its centre, pointer on top")
+{
+    cursor_finder::PointerImage p;
+    p.image.width = 20; p.image.height = 20;
+    p.image.rgba.assign(20 * 20 * 4, 0);
+    auto set = [&](int x, int y, int r, int g, int b, int a) {
+        const std::size_t i = (static_cast<std::size_t>(y) * 20 + x) * 4;
+        p.image.rgba[i] = static_cast<std::uint8_t>(r);
+        p.image.rgba[i + 1] = static_cast<std::uint8_t>(g);
+        p.image.rgba[i + 2] = static_cast<std::uint8_t>(b);
+        p.image.rgba[i + 3] = static_cast<std::uint8_t>(a);
+    };
+    for (int y = 0; y < 3; ++y)
+        for (int x = 0; x < 3; ++x) { set(x, y, 255, 0, 0, 255); }
+    set(0, 0, 0, 0, 0, 0);           // transparent: the marker shows through
+    set(19, 19, 255, 0, 0, 128);     // half see-through, over empty marker
+    p.hotspot_x = 1; p.hotspot_y = 1;
+
+    const auto c = cursor_finder::combine_pointer_with_radar_dash(dash_settings(), p);
+    CHECK_FALSE(c.capped);
+    REQUIRE(c.image.width == c.image.height);
+    CHECK(c.image.width % 2 == 0);
+    CHECK(c.image.width >= 2 * 41);
+    CHECK(c.hotspot_x == c.image.width / 2);
+    CHECK(c.hotspot_y == c.image.height / 2);
+    const int h = c.hotspot_x;
+    const Px hot = pixel_at(c.image, h, h);
+    CHECK(hot.r == 255); CHECK(hot.g == 0); CHECK(hot.b == 0); CHECK(hot.a == 255);
+    const Px through = pixel_at(c.image, h - 1, h - 1);
+    CHECK(through.r == 200); CHECK(through.g == 100); CHECK(through.b == 50);
+    CHECK(through.a == 255);
+    const Px half = pixel_at(c.image, h + 18, h + 18);
+    CHECK(half.r == 255); CHECK(half.g == 0); CHECK(half.b == 0); CHECK(half.a == 128);
+}
+
+TEST_CASE("pointer picture: the combined picture is capped at 256 px")
+{
+    cursor_finder::PointerImage p;
+    p.image.width = 300; p.image.height = 10;
+    p.image.rgba.assign(300 * 10 * 4, 255);
+    bool capped = false;
+    CHECK(cursor_finder::combined_side(dash_settings(), p, &capped) == 256);
+    CHECK(capped);
+    const auto c = cursor_finder::combine_pointer_with_radar_dash(dash_settings(), p);
+    CHECK(c.capped);
+    CHECK(c.image.width == 256);
+    CHECK(c.image.rgba.size() == 256u * 256u * 4u);
+    CHECK(c.hotspot_x == 128);
+
+    cursor_finder::PointerImage small;
+    small.image.width = 32; small.image.height = 32;
+    small.image.rgba.assign(32 * 32 * 4, 0);
+    CHECK(cursor_finder::combined_side(dash_settings(), small, &capped) == 82);
+    CHECK_FALSE(capped);
 }
